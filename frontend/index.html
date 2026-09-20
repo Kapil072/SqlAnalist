@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SQLAnalyst — AI-Powered SQL Data Analyst</title>
+  <meta name="description" content="Talk to your MySQL database in natural language. Automatically generate safe SQL queries, interactive charts, and business insights.">
+  
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  
+  <!-- Tailwind CSS v4 Browser CDN -->
+  <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
+  
+  <!-- Custom Design Tokens & Micro-Interactions -->
+  <link rel="stylesheet" href="app.css">
+</head>
+<body class="h-full text-slate-900 bg-slate-50 antialiased selection:bg-blue-100 selection:text-blue-900">
+  <div class="app-container">
+    <!-- Top Navigation (Frosted White Glass) -->
+    <header class="top-nav">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+            <path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"></path>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">SQLAnalyst</span>
+          <span class="brand-tag">MySQL Intelligence</span>
+        </div>
+      </div>
+
+      <div class="nav-center">
+        <div class="view-tabs">
+          <button id="tab-chat" class="tab-btn active" onclick="switchTab('chat')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+            AI Analyst
+          </button>
+          <button id="tab-sql" class="tab-btn" onclick="switchTab('sql')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+            SQL Console
+          </button>
+        </div>
+      </div>
+
+      <div class="nav-right">
+        <div class="db-status-pill" id="db-status-pill" title="Target Database Status">
+          <span class="status-dot"></span>
+          <span id="db-status-text">MySQL 8.0 @ localhost:3306</span>
+        </div>
+        <button class="icon-btn" id="btn-refresh-schema" title="Refresh Live Database Schema" onclick="loadSchema()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+        </button>
+        <button class="icon-btn" id="btn-clear-chat" title="Clear Conversation" onclick="clearChat()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+        </button>
+
+        <!-- User Menu -->
+        <div class="user-menu" id="user-menu">
+          <div class="user-pill" onclick="toggleUserDropdown()">
+            <div class="user-avatar" id="nav-user-avatar">U</div>
+            <div class="user-info-nav">
+              <span id="nav-user-name">User</span>
+              <span class="user-role-badge" id="nav-user-role">user</span>
+            </div>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+          </div>
+          <div class="user-dropdown" id="user-dropdown">
+            <a href="/admin.html" id="nav-admin-link" class="dropdown-item" style="display:none;">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              Admin Panel
+            </a>
+            <button class="dropdown-item" onclick="handleLogout()">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+              Sign Out
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <div class="workspace-layout">
+      <!-- Left Sidebar: Database Explorer -->
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+          <div class="sidebar-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-blue-600"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
+            <span>Database Schema</span>
+          </div>
+          <span class="badge" id="table-count-badge">4 Tables</span>
+        </div>
+
+        <div class="db-meta-card">
+          <div class="db-meta-row">
+            <span class="meta-label">Database</span>
+            <span class="meta-value font-mono text-blue-600">analytics</span>
+          </div>
+          <div class="db-meta-row">
+            <span class="meta-label">Total Records</span>
+            <span class="meta-value" id="total-records-count">...</span>
+          </div>
+        </div>
+
+        <!-- Tables Accordion List -->
+        <div class="schema-list-container" id="schema-list-container">
+          <div class="loading-state">Loading schema...</div>
+        </div>
+
+        <!-- Suggestion Chips -->
+        <div class="sidebar-section-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-blue-500"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+          Quick Analytical Prompts
+        </div>
+        <div class="suggestion-chips" id="suggestion-chips">
+          <!-- Populated by JS -->
+        </div>
+      </aside>
+
+      <!-- Center / Right: Chat & Analytics Studio -->
+      <main class="main-content">
+        <!-- View 1: AI Analyst Chat Stream -->
+        <div id="view-chat" class="view-panel active">
+          <div class="messages-scroll" id="messages-scroll">
+            <!-- Welcome Hero (Clean Slate Luminous) -->
+            <div class="welcome-hero" id="welcome-hero">
+              <div class="hero-badge">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                Real-Time Text-to-SQL Engine
+              </div>
+              <h1 class="hero-title">Ask your MySQL database anything in natural language.</h1>
+              <p class="hero-desc">SQLAnalyst translates business questions into high-performance, safe SQL queries, queries your live MySQL tables, and automatically renders interactive charts and explanations.</p>
+              
+              <div class="feature-grid">
+                <div class="feature-card" onclick="runSamplePrompt('Who are the top 5 customers by total spending?')">
+                  <div class="feature-icon"></div>
+                  <div class="feature-text">
+                    <strong>Top Customers</strong>
+                    <span>Find high-value shoppers by total order volume</span>
+                  </div>
+                </div>
+                <div class="feature-card" onclick="runSamplePrompt('Which product category generates the highest revenue?')">
+                  <div class="feature-icon"></div>
+                  <div class="feature-text">
+                    <strong>Category Revenue</strong>
+                    <span>Compare revenue and units across all departments</span>
+                  </div>
+                </div>
+                <div class="feature-card" onclick="runSamplePrompt('What are the top 5 best selling products by units sold?')">
+                  <div class="feature-icon"></div>
+                  <div class="feature-text">
+                    <strong>Best Selling Products</strong>
+                    <span>Analyze inventory velocity and top performers</span>
+                  </div>
+                </div>
+                <div class="feature-card" onclick="runSamplePrompt('How many orders are in each status (delivered, shipped, pending)?')">
+                  <div class="feature-icon"></div>
+                  <div class="feature-text">
+                    <strong>Fulfillment Breakdown</strong>
+                    <span>Monitor pending, shipped, and delivered packages</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Messages injected here -->
+            <div id="chat-messages" class="chat-messages"></div>
+          </div>
+
+          <!-- Floating Prompt Bar -->
+          <div class="chat-input-wrapper">
+            <form id="chat-form" onsubmit="handleSendQuestion(event)">
+              <div class="chat-input-bar">
+                <div class="input-prefix-icon">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                </div>
+                <input 
+                  type="text" 
+                  id="user-input" 
+                  placeholder="Ask a question about customers, revenue, products, or orders..." 
+                  autocomplete="off"
+                  required
+                />
+                <button type="submit" id="btn-submit" class="send-btn" title="Send question">
+                  <span id="send-btn-text">Ask AI</span>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <!-- View 2: Direct SQL Console -->
+        <div id="view-sql" class="view-panel">
+          <div class="sql-console-container">
+            <div class="console-header">
+              <div>
+                <h2>Raw SQL Query Console</h2>
+                <p>Run safe read-only <code>SELECT</code> queries directly against your MySQL <code>analytics</code> database.</p>
+              </div>
+              <button class="primary-btn" onclick="executeCustomSql()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                Run Query (Ctrl + Enter)
+              </button>
+            </div>
+
+            <div class="editor-box">
+              <textarea id="sql-editor" rows="6" spellcheck="false" placeholder="SELECT * FROM customers LIMIT 10;">SELECT c.name, COUNT(o.order_id) AS total_orders, SUM(o.total_amount) AS total_spent
+FROM customers c
+JOIN orders o ON c.customer_id = o.customer_id
+WHERE o.status = 'delivered'
+GROUP BY c.customer_id, c.name
+ORDER BY total_spent DESC
+LIMIT 5</textarea>
+            </div>
+
+            <div id="sql-console-results" class="console-results">
+              <div class="empty-state">Write a SQL query above and click <strong>Run Query</strong> to view live results.</div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+2026-09-09 12:23:49.645 | INFO     | app.db.schema_registry:_load_schema:26 | [SCHEMA] Loaded schema cache: ['customers', 'products', 'orders', 'order_items']
+2026-09-09 12:24:17.635 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 1 rows in 64ms (truncated=False)
+2026-09-09 12:24:17.640 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 3 rows in 3ms (truncated=False)
+2026-09-09 12:24:17.646 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 3 rows in 5ms (truncated=False)
+2026-09-09 12:28:09.169 | INFO     | app.main:lifespan:25 | [STARTUP] Ensuring App DB tables exist...
+2026-09-09 12:28:09.185 | INFO     | app.main:lifespan:28 | [STARTUP] App DB ready.
+2026-09-09 12:28:09.405 | INFO     | app.db.schema_registry:_load_schema:26 | [SCHEMA] Loaded schema cache: ['customers', 'products', 'orders', 'order_items']
+2026-09-09 12:28:09.413 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 3 rows in 7ms (truncated=False)
+2026-09-09 12:28:09.423 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 3 rows in 3ms (truncated=False)
+2026-09-09 12:28:09.431 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 3 rows in 2ms (truncated=False)
+2026-09-09 12:28:09.434 | INFO     | app.main:lifespan:31 | [SHUTDOWN] Application shutting down.
+2026-09-09 12:28:15.776 | INFO     | app.main:lifespan:25 | [STARTUP] Ensuring App DB tables exist...
+2026-09-09 12:28:15.783 | INFO     | app.main:lifespan:28 | [STARTUP] App DB ready.
+2026-09-09 12:28:15.806 | INFO     | app.main:lifespan:31 | [SHUTDOWN] Application shutting down.
+2026-09-09 12:28:46.319 | INFO     | app.main:lifespan:25 | [STARTUP] Ensuring App DB tables exist...
+2026-09-09 12:28:46.326 | INFO     | app.main:lifespan:28 | [STARTUP] App DB ready.
+2026-09-09 12:28:46.568 | INFO     | app.api.routes.auth:register:51 | [AUTH] New user registered: analyst@example.com (id=105411ad-ae84-4853-bd28-03f6057aeaeb)
+2026-09-09 12:28:46.569 | INFO     | app.core.email:send_welcome_email:19 | [EMAIL SKIP] Welcome email would have been sent to analyst@example.com (SMTP not configured — set SMTP_HOST, SMTP_USER, SMTP_PASSWORD in .env)
+2026-09-09 12:28:46.798 | INFO     | app.api.routes.auth:login:85 | [AUTH] Login: analyst@example.com
+2026-09-09 12:28:46.800 | INFO     | app.main:lifespan:31 | [SHUTDOWN] Application shutting down.
+2026-09-09 12:34:27.268 | INFO     | app.main:lifespan:29 | [STARTUP] Ensuring App DB tables exist...
+2026-09-09 12:34:27.291 | INFO     | app.main:lifespan:32 | [STARTUP] App DB ready.
+2026-09-09 12:34:27.399 | INFO     | app.db.schema_registry:_load_schema:26 | [SCHEMA] Loaded schema cache: ['customers', 'products', 'orders', 'order_items']
+2026-09-09 12:34:27.445 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 2ms (truncated=False)
+2026-09-09 12:34:27.454 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 1ms (truncated=False)
+2026-09-09 12:34:27.511 | INFO     | app.main:lifespan:35 | [SHUTDOWN] Application shutting down.
+2026-09-09 12:34:40.575 | INFO     | app.main:lifespan:29 | [STARTUP] Ensuring App DB tables exist...
+2026-09-09 12:34:40.582 | INFO     | app.main:lifespan:32 | [STARTUP] App DB ready.
+2026-09-09 13:32:56.305 | INFO     | app.db.schema_registry:_load_schema:26 | [SCHEMA] Loaded schema cache: ['customers', 'products', 'orders', 'order_items']
+2026-09-09 13:33:22.983 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 42ms (truncated=False)
+2026-09-09 13:34:15.736 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 16ms (truncated=False)
+2026-09-09 22:03:50.727 | INFO     | app.main:lifespan:29 | [STARTUP] Ensuring App DB tables exist...
+2026-09-09 22:03:50.746 | INFO     | app.main:lifespan:32 | [STARTUP] App DB ready.
+2026-09-09 22:04:55.738 | INFO     | app.db.schema_registry:_load_schema:26 | [SCHEMA] Loaded schema cache: ['customers', 'products', 'orders', 'order_items']
+2026-09-09 22:05:30.711 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 5ms (truncated=False)
+2026-09-09 22:05:52.418 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 6ms (truncated=False)
+2026-09-09 22:09:16.491 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 1ms (truncated=False)
+2026-09-09 22:11:49.037 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 1ms (truncated=False)
+2026-09-09 22:11:50.589 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 2ms (truncated=False)
+2026-09-09 22:11:52.646 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 2ms (truncated=False)
+2026-09-09 22:21:47.127 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 1ms (truncated=False)
+2026-09-09 22:22:31.009 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 1ms (truncated=False)
+2026-09-09 22:24:28.599 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 1ms (truncated=False)
+2026-09-09 22:24:33.096 | INFO     | app.db.executor:execute_safe_query:71 | [EXECUTOR] Query returned 5 rows in 3ms (truncated=False)

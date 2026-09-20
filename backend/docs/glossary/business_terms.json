@@ -1,0 +1,52 @@
+[
+  {
+    "term": "revenue",
+    "definition": "Total money received from orders. Computed as SUM(order_items.subtotal) or SUM(orders.total_amount) for delivered/completed orders.",
+    "sql_hint": "SUM(oi.subtotal) FROM order_items oi JOIN orders o ON oi.order_id = o.order_id WHERE o.status = 'delivered'"
+  },
+  {
+    "term": "GMV",
+    "definition": "Gross Merchandise Value — total value of all orders placed, regardless of status. Use SUM(orders.total_amount).",
+    "sql_hint": "SUM(total_amount) FROM orders"
+  },
+  {
+    "term": "AOV",
+    "definition": "Average Order Value — average total_amount per order. Computed as AVG(orders.total_amount).",
+    "sql_hint": "AVG(total_amount) FROM orders"
+  },
+  {
+    "term": "conversion rate",
+    "definition": "Percentage of orders that were successfully delivered vs all orders placed.",
+    "sql_hint": "COUNT(CASE WHEN status='delivered' THEN 1 END) * 100.0 / COUNT(*) FROM orders"
+  },
+  {
+    "term": "churn",
+    "definition": "Customers who placed an order more than 90 days ago and have not ordered since.",
+    "sql_hint": "Customers where MAX(orders.created_at) < CURRENT_DATE - INTERVAL '90 days'"
+  },
+  {
+    "term": "repeat customer",
+    "definition": "A customer who has placed more than one order.",
+    "sql_hint": "customer_id FROM orders GROUP BY customer_id HAVING COUNT(*) > 1"
+  },
+  {
+    "term": "top selling product",
+    "definition": "Product with the highest total revenue or units sold. Join order_items to products and aggregate.",
+    "sql_hint": "SUM(oi.subtotal) as revenue FROM order_items oi JOIN products p ON oi.product_id = p.product_id GROUP BY p.name ORDER BY revenue DESC"
+  },
+  {
+    "term": "MoM",
+    "definition": "Month-over-Month — comparing a metric from the current month to the previous month.",
+    "sql_hint": "Use DATE_TRUNC('month', created_at) to group by month"
+  },
+  {
+    "term": "QoQ",
+    "definition": "Quarter-over-Quarter — comparing a metric from the current quarter to the previous quarter.",
+    "sql_hint": "Use DATE_TRUNC('quarter', created_at) to group by quarter"
+  },
+  {
+    "term": "YoY",
+    "definition": "Year-over-Year — comparing a metric from the current year to the previous year.",
+    "sql_hint": "Use EXTRACT(YEAR FROM created_at) to group by year"
+  }
+]

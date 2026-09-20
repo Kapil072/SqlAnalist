@@ -1,0 +1,28 @@
+{
+  "table": "order_items",
+  "description": "Line items within an order. One row per product per order. Use this table to compute per-product revenue, quantity sold, and to join products with orders.",
+  "use_cases": [
+    "Revenue per product or category",
+    "Units sold per product",
+    "Average order item value",
+    "Finding which products appear most in orders"
+  ],
+  "columns": {
+    "item_id": "Primary key — unique identifier for each line item (INTEGER or UUID)",
+    "order_id": "Foreign key linking to orders.order_id (INTEGER or UUID)",
+    "product_id": "Foreign key linking to products.product_id (INTEGER or UUID)",
+    "quantity": "Number of units of this product in the order (INTEGER)",
+    "unit_price": "Price per unit at the time of purchase in USD (NUMERIC). May differ from products.price if price changed.",
+    "subtotal": "Total value for this line item: quantity × unit_price (NUMERIC)"
+  },
+  "join_hints": {
+    "orders": "JOIN orders ON order_items.order_id = orders.order_id",
+    "products": "JOIN products ON order_items.product_id = products.product_id",
+    "full_chain": "order_items JOIN orders ON order_items.order_id = orders.order_id JOIN products ON order_items.product_id = products.product_id JOIN customers ON orders.customer_id = customers.customer_id"
+  },
+  "sample_questions": [
+    "What are the top 5 products by total revenue?",
+    "How many units of each product were sold last quarter?",
+    "Which product category generates the most revenue?"
+  ]
+}

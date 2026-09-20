@@ -1,0 +1,26 @@
+{
+  "table": "products",
+  "description": "Product catalog. One row per SKU (stock keeping unit). Contains pricing, category, and inventory data.",
+  "use_cases": [
+    "Listing products by category",
+    "Finding most/least expensive products",
+    "Checking stock levels",
+    "Joining to order_items to compute revenue per product"
+  ],
+  "columns": {
+    "product_id": "Primary key — unique identifier for each product (INTEGER or UUID)",
+    "name": "Product name (TEXT, e.g. 'Wireless Headphones Pro')",
+    "category": "Product category (TEXT, e.g. 'Electronics', 'Clothing', 'Books', 'Home & Garden')",
+    "price": "Current unit price in USD (NUMERIC, e.g. 29.99)",
+    "stock_quantity": "Current units in inventory (INTEGER)",
+    "created_at": "Timestamp when the product was added to the catalog (TIMESTAMPTZ)"
+  },
+  "join_hints": {
+    "order_items": "JOIN order_items ON products.product_id = order_items.product_id"
+  },
+  "sample_questions": [
+    "What are the top 5 best-selling products by revenue?",
+    "Which products have less than 10 units in stock?",
+    "What is the average price by category?"
+  ]
+}

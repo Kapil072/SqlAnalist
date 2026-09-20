@@ -1,0 +1,27 @@
+[
+  {
+    "question": "What is the total revenue for the current month?",
+    "sql": "SELECT SUM(total_amount) AS total_revenue FROM orders WHERE status = 'delivered' AND created_at >= DATE_TRUNC('month', CURRENT_DATE);",
+    "explanation": "Calculates the sum of total_amount from the orders table for delivered orders created in the current month."
+  },
+  {
+    "question": "Who are the top 5 customers by total spending?",
+    "sql": "SELECT c.name, SUM(o.total_amount) AS total_spent FROM customers c JOIN orders o ON c.customer_id = o.customer_id WHERE o.status = 'delivered' GROUP BY c.customer_id, c.name ORDER BY total_spent DESC LIMIT 5;",
+    "explanation": "Joins customers and orders, groups by customer, sums the total amount of delivered orders, sorts in descending order, and limits to top 5."
+  },
+  {
+    "question": "Which product category generates the most revenue?",
+    "sql": "SELECT p.category, SUM(oi.subtotal) AS category_revenue FROM products p JOIN order_items oi ON p.product_id = oi.product_id JOIN orders o ON oi.order_id = o.order_id WHERE o.status = 'delivered' GROUP BY p.category ORDER BY category_revenue DESC LIMIT 1;",
+    "explanation": "Joins products, order_items, and orders to compute the total subtotal per product category for delivered orders, then selects the top one."
+  },
+  {
+    "question": "How many orders are currently pending?",
+    "sql": "SELECT COUNT(*) AS pending_orders FROM orders WHERE status = 'pending';",
+    "explanation": "Counts the number of rows in the orders table where the status is 'pending'."
+  },
+  {
+    "question": "What are the top selling products by units sold?",
+    "sql": "SELECT p.name, SUM(oi.quantity) AS units_sold FROM products p JOIN order_items oi ON p.product_id = oi.product_id JOIN orders o ON oi.order_id = o.order_id WHERE o.status = 'delivered' GROUP BY p.product_id, p.name ORDER BY units_sold DESC LIMIT 10;",
+    "explanation": "Joins products, order_items, and orders, grouping by product to sum the quantity sold across all delivered orders, ordering by most sold."
+  }
+]

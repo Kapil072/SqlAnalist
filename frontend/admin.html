@@ -1,0 +1,190 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SQLAnalyst — Admin Panel</title>
+  <meta name="description" content="SQLAnalyst admin dashboard — manage users and view audit logs.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-logo">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <div class="brand-name">SQLAnalyst</div>
+        <div class="brand-tag">Admin Console</div>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <button class="nav-item active" id="nav-dashboard" onclick="switchSection('dashboard')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+        Dashboard
+      </button>
+      <button class="nav-item" id="nav-users" onclick="switchSection('users')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        User Management
+      </button>
+      <button class="nav-item" id="nav-logs" onclick="switchSection('logs')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        Audit Logs
+      </button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="admin-info" id="admin-info">
+        <div class="admin-avatar" id="admin-avatar">A</div>
+        <div class="admin-details">
+          <div class="admin-name" id="admin-name">Admin</div>
+          <div class="admin-role">Administrator</div>
+        </div>
+      </div>
+      <button class="nav-item danger" onclick="handleLogout()">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        Sign Out
+      </button>
+      <a class="nav-item" href="/">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        Back to App
+      </a>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main" id="main">
+    <!-- Top Bar -->
+    <header class="topbar">
+      <div class="topbar-title" id="topbar-title">Dashboard</div>
+      <div class="topbar-right">
+        <span class="last-updated" id="last-updated"></span>
+        <button class="refresh-btn" onclick="refreshCurrentSection()" title="Refresh">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- DASHBOARD SECTION -->
+    <section id="section-dashboard" class="content-section active">
+      <div class="stats-grid" id="stats-grid">
+        <div class="stat-card" id="stat-users">
+          <div class="stat-icon users"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+          <div class="stat-info">
+            <div class="stat-value" id="stat-total-users">—</div>
+            <div class="stat-label">Total Users</div>
+          </div>
+          <div class="stat-sub" id="stat-active-users">— active</div>
+        </div>
+        <div class="stat-card" id="stat-admins">
+          <div class="stat-icon admins"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+          <div class="stat-info">
+            <div class="stat-value" id="stat-admin-count">—</div>
+            <div class="stat-label">Administrators</div>
+          </div>
+        </div>
+        <div class="stat-card" id="stat-queries">
+          <div class="stat-icon queries"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
+          <div class="stat-info">
+            <div class="stat-value" id="stat-total-queries">—</div>
+            <div class="stat-label">Total Queries</div>
+          </div>
+          <div class="stat-sub success" id="stat-success-queries">— success</div>
+        </div>
+        <div class="stat-card" id="stat-errors">
+          <div class="stat-icon errors"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></div>
+          <div class="stat-info">
+            <div class="stat-value" id="stat-failed-queries">—</div>
+            <div class="stat-label">Failed Queries</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-heading">Recent Activity</div>
+      <div class="table-card">
+        <div id="recent-logs-container">
+          <div class="loading-row">Loading recent activity…</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- USERS SECTION -->
+    <section id="section-users" class="content-section">
+      <div class="section-controls">
+        <div class="section-heading" style="margin:0;">All Users</div>
+        <div class="controls-right">
+          <span class="total-label" id="users-total">— users</span>
+          <button class="ctrl-btn" onclick="loadUsers()">Refresh</button>
+        </div>
+      </div>
+      <div class="table-card">
+        <div class="table-wrap">
+          <table id="users-table" class="data-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Verified</th>
+                <th>Joined</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="users-tbody">
+              <tr><td colspan="7" class="loading-row">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- AUDIT LOGS SECTION -->
+    <section id="section-logs" class="content-section">
+      <div class="section-controls">
+        <div class="section-heading" style="margin:0;">Audit Logs</div>
+        <div class="controls-right">
+          <select id="log-status-filter" onchange="loadLogs()" class="filter-select">
+            <option value="">All statuses</option>
+            <option value="success">Success</option>
+            <option value="error">Error</option>
+          </select>
+          <span class="total-label" id="logs-total">— entries</span>
+          <button class="ctrl-btn" onclick="loadLogs()">Refresh</button>
+        </div>
+      </div>
+      <div class="table-card">
+        <div class="table-wrap">
+          <table id="logs-table" class="data-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Question</th>
+                <th>Status</th>
+                <th>Rows</th>
+                <th>Time (ms)</th>
+                <th>Date</th>
+              </tr>
+            </thead>
+            <tbody id="logs-tbody">
+              <tr><td colspan="6" class="loading-row">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Toast notification -->
+  <div class="toast" id="toast"></div>
+
+  <script src="admin.js"></script>
+</body>
+</html>

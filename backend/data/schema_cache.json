@@ -1,0 +1,120 @@
+{
+  "tables": {
+    "customers": {
+      "columns": [
+        {
+          "name": "customer_id",
+          "type": "int"
+        },
+        {
+          "name": "name",
+          "type": "varchar(255)"
+        },
+        {
+          "name": "email",
+          "type": "varchar(255)"
+        },
+        {
+          "name": "country",
+          "type": "varchar(100)"
+        },
+        {
+          "name": "city",
+          "type": "varchar(100)"
+        },
+        {
+          "name": "created_at",
+          "type": "datetime"
+        }
+      ]
+    },
+    "order_items": {
+      "columns": [
+        {
+          "name": "item_id",
+          "type": "int"
+        },
+        {
+          "name": "order_id",
+          "type": "int"
+        },
+        {
+          "name": "product_id",
+          "type": "int"
+        },
+        {
+          "name": "quantity",
+          "type": "int"
+        },
+        {
+          "name": "unit_price",
+          "type": "decimal(10,2)"
+        },
+        {
+          "name": "subtotal",
+          "type": "decimal(10,2)"
+        }
+      ]
+    },
+    "orders": {
+      "columns": [
+        {
+          "name": "order_id",
+          "type": "int"
+        },
+        {
+          "name": "customer_id",
+          "type": "int"
+        },
+        {
+          "name": "status",
+          "type": "varchar(50)"
+        },
+        {
+          "name": "total_amount",
+          "type": "decimal(10,2)"
+        },
+        {
+          "name": "created_at",
+          "type": "datetime"
+        },
+        {
+          "name": "shipped_at",
+          "type": "datetime"
+        },
+        {
+          "name": "delivered_at",
+          "type": "datetime"
+        }
+      ]
+    },
+    "products": {
+      "columns": [
+        {
+          "name": "product_id",
+          "type": "int"
+        },
+        {
+          "name": "name",
+          "type": "varchar(255)"
+        },
+        {
+          "name": "category",
+          "type": "varchar(100)"
+        },
+        {
+          "name": "price",
+          "type": "decimal(10,2)"
+        },
+        {
+          "name": "stock_quantity",
+          "type": "int"
+        },
+        {
+          "name": "created_at",
+          "type": "datetime"
+        }
+      ]
+    }
+  }
+}

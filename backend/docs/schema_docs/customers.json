@@ -1,0 +1,26 @@
+{
+  "table": "customers",
+  "description": "One row per registered customer. Contains customer identity, location, and registration date.",
+  "use_cases": [
+    "Finding customers by country or city",
+    "Counting total registered customers",
+    "Joining to orders to find high-value customers",
+    "Segmenting customers by signup date"
+  ],
+  "columns": {
+    "customer_id": "Primary key — unique identifier for each customer (INTEGER or UUID)",
+    "name": "Full name of the customer (TEXT)",
+    "email": "Email address — unique across all customers (TEXT)",
+    "country": "Country the customer is located in (TEXT, e.g. 'United States', 'Germany')",
+    "city": "City the customer is located in (TEXT)",
+    "created_at": "Timestamp when the customer registered (TIMESTAMPTZ)"
+  },
+  "join_hints": {
+    "orders": "JOIN orders ON customers.customer_id = orders.customer_id"
+  },
+  "sample_questions": [
+    "How many customers do we have from each country?",
+    "Who are our top 10 customers by total spending?",
+    "How many new customers signed up last month?"
+  ]
+}

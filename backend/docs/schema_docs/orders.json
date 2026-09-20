@@ -1,0 +1,28 @@
+{
+  "table": "orders",
+  "description": "One row per customer order. Links customers to their purchases. Tracks order status and total value.",
+  "use_cases": [
+    "Revenue analysis by time period",
+    "Order volume and status breakdown",
+    "Finding the most valuable orders",
+    "Shipping and delivery performance"
+  ],
+  "columns": {
+    "order_id": "Primary key — unique identifier for each order (INTEGER or UUID)",
+    "customer_id": "Foreign key linking to customers.customer_id (INTEGER or UUID)",
+    "status": "Current status of the order (TEXT): 'pending', 'processing', 'shipped', 'delivered', 'cancelled'",
+    "total_amount": "Total value of the order in USD (NUMERIC). Sum of all order_items subtotals.",
+    "created_at": "Timestamp when the order was placed (TIMESTAMPTZ)",
+    "shipped_at": "Timestamp when the order was shipped — NULL if not yet shipped (TIMESTAMPTZ)",
+    "delivered_at": "Timestamp when the order was delivered — NULL if not yet delivered (TIMESTAMPTZ)"
+  },
+  "join_hints": {
+    "customers": "JOIN customers ON orders.customer_id = customers.customer_id",
+    "order_items": "JOIN order_items ON orders.order_id = order_items.order_id"
+  },
+  "sample_questions": [
+    "What is the total revenue this month?",
+    "How many orders were placed each day last week?",
+    "What percentage of orders are currently in 'pending' status?"
+  ]
+}
