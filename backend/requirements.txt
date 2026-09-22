@@ -13,6 +13,9 @@ alembic==1.19.2
 
 psycopg2-binary==2.9.13
 aiosqlite==0.22.1
+aiomysql==0.2.0
+aioodbc==0.5.0
+oracledb==2.4.0
 
 # Authentication / Security
 
@@ -71,3 +74,6 @@ anyio==4.15.1
 # Environment / Development Utilities
 
 python-dotenv==1.2.3
+
+# Encryption for database passwords
+cryptography==44.0.0

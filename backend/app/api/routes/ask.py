@@ -5,22 +5,31 @@ and returns data tables, visualizations, and plain-English explanations.
 """
 
 import re
+import uuid
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.config import settings
 from app.db.schema_registry import get_schema
 from app.db.executor import execute_safe_query, QueryResult
+from app.db.session import get_db
+from app.models.data_source import DataSource
 from app.sql_safety.validator import validate_sql
 from app.utils.logger import logger
 from app.langchain_chains.prompts import SQL_GENERATION_PROMPT
+from app.services.connection_manager import ConnectionManager
+from app.core.security import get_current_user
+from app.models.user import User
 router = APIRouter(tags=["analysis"])
 
 
 class AskRequest(BaseModel):
     question: str
     session_id: Optional[str] = None
+    data_source_id: Optional[str] = None  # Optional: query against specific data source
 
 
 class ChartConfig(BaseModel):
@@ -229,17 +238,54 @@ def _generate_explanation(question: str, columns: List[str], rows: List[List[Any
 
 
 @router.post("/ask", response_model=AskResponse)
-async def ask_question(body: AskRequest):
+async def ask_question(
+    body: AskRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """
     Main Natural Language Text-to-SQL endpoint.
     1. Generates MySQL query from question.
     2. Validates SQL through 11 safety rules.
-    3. Executes query on MySQL target DB.
+    3. Executes query on MySQL target DB or dynamic data source.
     4. Recommends interactive chart and business summary.
     """
     question = body.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    # Check if using dynamic data source
+    data_source = None
+    dialect = "mysql"  # default
+
+    if body.data_source_id:
+        try:
+            data_source_uuid = uuid.UUID(body.data_source_id)
+            result = await db.execute(
+                select(DataSource).where(DataSource.id == data_source_uuid)
+            )
+            data_source = result.scalar_one_or_none()
+
+            if not data_source:
+                raise HTTPException(status_code=404, detail="Data source not found")
+
+            if not data_source.is_active:
+                raise HTTPException(status_code=400, detail="Data source is not active")
+
+            # Determine dialect based on db_type
+            dialect_map = {
+                "postgresql": "postgres",
+                "mysql": "mysql",
+                "sqlite": "sqlite",
+                "sqlserver": "mssql",
+                "oracle": "oracle",
+            }
+            dialect = dialect_map.get(data_source.db_type, "mysql")
+
+            logger.info(f"[ASK] Using dynamic data source: {data_source.name} ({data_source.db_type})")
+
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid data source ID format")
 
     # 1. SQL Generation (Groq LLM or analytical engine)
     generated_sql = _generate_sql_groq(question)
@@ -251,14 +297,66 @@ async def ask_question(body: AskRequest):
 
     # 2. Safety Validation (11 AST checks)
     try:
-        validated_sql = validate_sql(generated_sql, dialect="mysql")
+        validated_sql = validate_sql(generated_sql, dialect=dialect)
     except Exception as val_err:
         logger.error(f"[ASK] SQL validation failed for '{generated_sql}': {val_err}")
         raise HTTPException(status_code=400, detail=f"Safety Check Failed: {val_err}")
 
-    # 3. Execution on MySQL Target DB
+    # 3. Execution on Target DB or Dynamic Data Source
     try:
-        res: QueryResult = execute_safe_query(validated_sql)
+        if data_source:
+            # Execute against dynamic data source
+            from sqlalchemy import text
+            from app.config import settings
+
+            engine = ConnectionManager.get_engine(data_source)
+            max_rows = settings.db_max_rows
+
+            import time
+            start_time = time.monotonic()
+
+            async with engine.connect() as conn:
+                # Set timeout for PostgreSQL
+                if data_source.db_type == "postgresql":
+                    try:
+                        await conn.execute(text("SET statement_timeout = '30s'"))
+                    except Exception:
+                        pass
+
+                result = await conn.execute(text(validated_sql))
+
+                columns = []
+                rows = []
+                truncated = False
+
+                if result.returns_rows:
+                    columns = list(result.keys())
+                    raw_rows = result.fetchmany(max_rows + 1)
+
+                    if len(raw_rows) > max_rows:
+                        raw_rows = raw_rows[:max_rows]
+                        truncated = True
+
+                    rows = [list(row) for row in raw_rows]
+
+                timing_ms = int((time.monotonic() - start_time) * 1000)
+
+                res = QueryResult(
+                    columns=columns,
+                    rows=rows,
+                    row_count=len(rows),
+                    timing_ms=timing_ms,
+                    truncated=truncated,
+                )
+
+                logger.info(
+                    f"[ASK] Query executed on {data_source.name}: "
+                    f"{len(rows)} rows in {timing_ms}ms (truncated={truncated})"
+                )
+        else:
+            # Execute against default target DB
+            res: QueryResult = execute_safe_query(validated_sql)
+
     except Exception as exec_err:
         logger.error(f"[ASK] Query execution failed: {exec_err}")
         raise HTTPException(status_code=400, detail=f"Database Execution Error: {exec_err}")

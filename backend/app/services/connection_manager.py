@@ -3,13 +3,27 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy import inspect
 from cryptography.fernet import Fernet
 from app.models.data_source import DataSource
+from app.config import settings
+from app.utils.logger import logger
 
-# Ensure we have an encryption key (in production, this should come from env)
-ENCRYPTION_KEY = os.getenv("DB_ENCRYPTION_KEY", Fernet.generate_key().decode())
+# Initialize encryption key
+def _get_encryption_key():
+    """Get encryption key from settings or generate one for development."""
+    key = settings.db_encryption_key
+    if not key:
+        key = Fernet.generate_key().decode()
+        logger.warning("[CONNECTION_MANAGER] Using auto-generated encryption key. Set DB_ENCRYPTION_KEY environment variable for production.")
+    return key
+
+ENCRYPTION_KEY = _get_encryption_key()
 fernet = Fernet(ENCRYPTION_KEY.encode())
 
 # In-memory cache for engines to avoid creating new connections constantly
 _engine_cache = {}
+
+def get_engine_cache():
+    """Get the engine cache for external access."""
+    return _engine_cache
 
 class ConnectionManager:
     @staticmethod
@@ -32,6 +46,10 @@ class ConnectionManager:
             return f"postgresql+asyncpg://{data_source.username}:{password}@{data_source.host}:{data_source.port}/{data_source.database_name}"
         elif data_source.db_type == "mysql":
             return f"mysql+aiomysql://{data_source.username}:{password}@{data_source.host}:{data_source.port}/{data_source.database_name}"
+        elif data_source.db_type == "sqlserver":
+            return f"mssql+aioodbc://{data_source.username}:{password}@{data_source.host}:{data_source.port}/{data_source.database_name}"
+        elif data_source.db_type == "oracle":
+            return f"oracle+oracledb://{data_source.username}:{password}@{data_source.host}:{data_source.port}/{data_source.database_name}"
         raise ValueError(f"Unsupported db_type: {data_source.db_type}")
 
     @staticmethod

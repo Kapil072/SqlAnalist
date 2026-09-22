@@ -2,6 +2,10 @@
 let activeTab = 'chat';
 let chartInstances = {};
 
+// Session ID persisted for the lifetime of the browser tab so RAG
+// context accumulates across questions in the same conversation.
+let chatSessionId = sessionStorage.getItem('sqlanalyst_session_id') || null;
+
 /* ── Auth helpers ──────────────────────────────────────────── */
 function getToken() { return localStorage.getItem('sqlanalyst_token'); }
 function getUser()  {
@@ -176,6 +180,9 @@ async function loadSchema() {
 function clearChat() {
   document.getElementById('chat-messages').innerHTML = '';
   document.getElementById('welcome-hero').style.display = 'flex';
+  // Reset in-memory RAG session so history is wiped on the server too
+  chatSessionId = null;
+  sessionStorage.removeItem('sqlanalyst_session_id');
 }
 
 // Run a prompt directly
@@ -185,47 +192,277 @@ function runSamplePrompt(question) {
   document.getElementById('chat-form').requestSubmit();
 }
 
-// Handle Natural Language Question Submission
+// ─────────────────────────────────────────────────────────────────
+// Streaming question handler  (replaces the old handleSendQuestion)
+// ─────────────────────────────────────────────────────────────────
 async function handleSendQuestion(e) {
   e.preventDefault();
-  const input = document.getElementById('user-input');
-  const btn = document.getElementById('btn-submit');
+
+  const input    = document.getElementById('user-input');
+  const btn      = document.getElementById('btn-submit');
   const sendText = document.getElementById('send-btn-text');
   const question = input.value.trim();
   if (!question) return;
 
-  // Hide welcome hero
   document.getElementById('welcome-hero').style.display = 'none';
-
-  // Append user bubble
   appendUserMessage(question);
-  input.value = '';
-  btn.disabled = true;
-  sendText.textContent = 'Analyzing...';
+  input.value   = '';
+  btn.disabled  = true;
+  sendText.textContent = 'Analyzing…';
+  scrollToBottom();
 
-  // Scroll to bottom
+  // Create the assistant card immediately (skeleton state)
+  const { cardEl, chartId, setMeta, appendToken, setError } =
+    createStreamingCard();
+  document.getElementById('chat-messages').appendChild(cardEl);
   scrollToBottom();
 
   try {
-    const res = await authFetch('http://localhost:8000/ask', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question })
+    const token   = getToken();
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(token ? { 'Authorization': 'Bearer ' + token } : {}),
+    };
+
+    const response = await fetch('http://localhost:8000/ask/stream', {
+      method:  'POST',
+      headers,
+      body: JSON.stringify({
+        question,
+        session_id: chatSessionId || undefined,
+      }),
     });
 
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.detail || 'Failed to process question');
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: 'Stream failed' }));
+      throw new Error(err.detail || 'Stream request failed');
     }
 
-    appendAssistantMessage(data);
+    // ── Read the SSE stream ──────────────────────────────────────
+    const reader  = response.body.getReader();
+    const decoder = new TextDecoder();
+    let   buffer  = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by double newlines
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop(); // keep incomplete last frame
+
+      for (const frame of frames) {
+        if (!frame.trim()) continue;
+
+        // Parse "event: xxx\ndata: yyy"
+        let eventName = 'message';
+        let dataStr   = '';
+
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) {
+            eventName = line.slice(6).trim();
+          } else if (line.startsWith('data:')) {
+            dataStr = line.slice(5).trim();
+          }
+        }
+
+        let payload;
+        try { payload = JSON.parse(dataStr); }
+        catch { payload = dataStr; }
+
+        // ── Dispatch by event type ───────────────────────────────
+        if (eventName === 'meta') {
+          // Server confirmed session_id — store it for future turns
+          if (payload.session_id) {
+            chatSessionId = payload.session_id;
+            sessionStorage.setItem('sqlanalyst_session_id', chatSessionId);
+          }
+          setMeta(payload, chartId);
+          scrollToBottom();
+
+        } else if (eventName === 'token') {
+          appendToken(payload.token || '');
+          scrollToBottom();
+
+        } else if (eventName === 'done') {
+          // Stream finished — nothing extra to do; card is already complete
+          scrollToBottom();
+
+        } else if (eventName === 'error') {
+          setError((payload && payload.detail) || 'Unknown error');
+          scrollToBottom();
+        }
+      }
+    }
+
   } catch (err) {
-    appendErrorMessage(err.message);
+    setError(err.message);
+    scrollToBottom();
   } finally {
     btn.disabled = false;
     sendText.textContent = 'Ask AI';
-    scrollToBottom();
   }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Build a streaming assistant card
+// Returns helpers to progressively fill the card.
+// ─────────────────────────────────────────────────────────────────
+function createStreamingCard() {
+  const cardId  = 'card-' + Date.now();
+  const chartId = 'chart-' + Date.now();
+  const expId   = 'exp-'   + Date.now();
+
+  const div = document.createElement('div');
+  div.className = 'message-assistant';
+  div.id = cardId;
+
+  div.innerHTML = `
+    <div class="assistant-header">
+      <div class="assistant-tag">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2.2">
+          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83
+                   M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+        </svg>
+        <span>SQLAnalyst Intelligence</span>
+      </div>
+      <div class="assistant-metrics" id="metrics-${cardId}">
+        <span class="metric-pill stream-thinking">Thinking…</span>
+      </div>
+    </div>
+
+    <!-- SQL block (hidden until meta arrives) -->
+    <div class="sql-box" id="sqlbox-${cardId}" style="display:none">
+      <div class="sql-box-header">
+        <span>SQL Query</span>
+        <button class="copy-btn" onclick="copySql('${cardId}')">Copy SQL</button>
+      </div>
+      <pre class="sql-code" id="code-${cardId}"></pre>
+    </div>
+
+    <!-- Explanation — tokens are appended here character-by-character -->
+    <p class="explanation-text" id="${expId}">
+      <span class="stream-cursor">▋</span>
+    </p>
+
+    <!-- Chart placeholder -->
+    <div id="chartbox-${cardId}" style="display:none">
+      <div class="chart-card">
+        <div class="chart-title" id="charttitle-${cardId}"></div>
+        <div class="chart-canvas-box">
+          <canvas id="${chartId}"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Data table placeholder -->
+    <div id="tablebox-${cardId}" style="display:none" class="table-wrapper">
+      <table class="data-table">
+        <thead id="thead-${cardId}"></thead>
+        <tbody id="tbody-${cardId}"></tbody>
+      </table>
+    </div>
+  `;
+
+  // ── setMeta: called once when [event: meta] arrives ─────────────
+  function setMeta(data, cId) {
+    // Metrics pill row
+    const metricsEl = document.getElementById('metrics-' + cardId);
+    if (metricsEl) {
+      metricsEl.innerHTML = `
+        <span class="metric-pill">${data.timing_ms}ms</span>
+        <span class="metric-pill">${data.row_count} rows</span>
+        <span class="metric-pill success">Safe Query</span>
+        ${data.rag_turns_used > 0
+          ? `<span class="metric-pill rag-pill" title="RAG context from ${data.rag_turns_used} past turn(s)">
+               🧠 RAG ×${data.rag_turns_used}
+             </span>`
+          : ''}
+      `;
+    }
+
+    // SQL box
+    const sqlBox  = document.getElementById('sqlbox-' + cardId);
+    const codeEl  = document.getElementById('code-'   + cardId);
+    if (sqlBox && codeEl) {
+      codeEl.textContent = data.sql_query;
+      sqlBox.style.display = '';
+    }
+
+    // Data table
+    if (data.columns && data.columns.length) {
+      const thead = document.getElementById('thead-' + cardId);
+      const tbody = document.getElementById('tbody-' + cardId);
+      const tbox  = document.getElementById('tablebox-' + cardId);
+
+      if (thead) {
+        thead.innerHTML =
+          '<tr>' + data.columns.map(c => `<th>${escapeHtml(c)}</th>`).join('') + '</tr>';
+      }
+      if (tbody) {
+        tbody.innerHTML = data.rows.slice(0, 15).map(row =>
+          '<tr>' + row.map(val =>
+            `<td>${val !== null && val !== undefined
+              ? escapeHtml(String(val))
+              : '<span style="color:#94a3b8">NULL</span>'
+            }</td>`
+          ).join('') + '</tr>'
+        ).join('');
+      }
+      if (tbox) tbox.style.display = '';
+    }
+
+    // Chart
+    if (data.chart && data.columns && data.rows) {
+      const chartbox   = document.getElementById('chartbox-'  + cardId);
+      const chartTitle = document.getElementById('charttitle-' + cardId);
+      if (chartTitle) chartTitle.textContent = data.chart.title || '';
+      if (chartbox)   chartbox.style.display = '';
+      renderChart(cId, data);
+    }
+  }
+
+  // ── appendToken: called for every [event: token] chunk ──────────
+  function appendToken(chunk) {
+    const expEl = document.getElementById(expId);
+    if (!expEl) return;
+
+    // Remove the blinking cursor, append the chunk, restore cursor
+    const cursor = expEl.querySelector('.stream-cursor');
+    if (cursor) cursor.remove();
+
+    // Append a text node so HTML in the chunk is treated as plain text
+    expEl.appendChild(document.createTextNode(chunk));
+
+    // Re-add cursor at the end
+    const cur = document.createElement('span');
+    cur.className = 'stream-cursor';
+    cur.textContent = '▋';
+    expEl.appendChild(cur);
+  }
+
+  // ── setError: replace card content with an error message ────────
+  function setError(msg) {
+    div.innerHTML = `
+      <div style="color:#b91c1c;font-weight:600;display:flex;align-items:center;gap:8px;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="12" y1="8" x2="12" y2="12"></line>
+          <line x1="12" y1="16" x2="12.01" y2="16"></line>
+        </svg>
+        Query Error
+      </div>
+      <p style="color:#7f1d1d;font-size:0.9rem;margin-top:6px;
+                background:#fff1f2;padding:10px 14px;border-radius:8px;
+                border:1px solid #fecdd3;">${escapeHtml(msg)}</p>
+    `;
+  }
+
+  return { cardEl: div, chartId, setMeta, appendToken, setError };
 }
 
 // Append User Bubble

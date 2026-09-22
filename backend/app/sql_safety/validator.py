@@ -60,6 +60,7 @@ def validate_sql(raw_sql: str, dialect: Optional[str] = None) -> str:
         )
 
     # ── Check 8: No DDL or DML nodes anywhere in the AST ─────────────────────
+    # Enhanced read-only enforcement - strictly block all modification operations
     _alter_node = getattr(exp, "AlterTable", exp.Alter)
     _forbidden_node_types = (
         exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Create,
@@ -69,7 +70,7 @@ def validate_sql(raw_sql: str, dialect: Optional[str] = None) -> str:
         if isinstance(node, _forbidden_node_types):
             raise SQLValidationError(
                 check=8,
-                message=f"DDL/DML operation detected in AST: {type(node).__name__}",
+                message=f"DDL/DML operation detected in AST: {type(node).__name__}. Only SELECT statements are allowed for read-only access.",
             )
 
     # ── Check 9: No system tables ─────────────────────────────────────────────

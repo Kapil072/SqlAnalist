@@ -9,6 +9,7 @@ class AskRequest:
     """Input from client for an ask operation."""
     session_id: str
     question: str
+    data_source_id: Optional[str] = None  # Optional: query against specific data source
 
 
 @dataclass

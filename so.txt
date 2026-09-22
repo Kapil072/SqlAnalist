@@ -9,3 +9,34 @@ uI
 
 cd D:\worksbot\project3.0\sqlanalyst\frontend
 python -m http.server 5173 --bind 127.0.0.1
+
+
+
+
+cd D:\worksbot\project3.0\sqlanalyst
+
+@"
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
+"@ | Set-Content .gitignore
+
+git add .
+git status
+git commit -m "Initial SQLAnalyst project"
+git branch -M main
+git remote remove origin 2>$null
+git remote add origin https://github.com/Kapil072/SqlAnalist.git
+git push -u origin main

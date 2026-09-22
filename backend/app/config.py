@@ -45,6 +45,7 @@ class Settings:
 
     # Security
     db_max_rows: int = _int("DB_MAX_ROWS", 10000)
+    db_encryption_key: str = os.getenv("DB_ENCRYPTION_KEY", "")
 
     # SMTP (for email verification & password reset)
     smtp_host: str = os.getenv("SMTP_HOST", "")

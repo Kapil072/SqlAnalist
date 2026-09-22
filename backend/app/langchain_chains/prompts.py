@@ -1,6 +1,35 @@
 from langchain_core.prompts import ChatPromptTemplate
 
 # -----------------------------------------------------------------------------
+# RAG-Augmented Explanation Prompt
+# -----------------------------------------------------------------------------
+RAG_EXPLANATION_TEMPLATE = """You are a senior data analyst presenting findings to a business user.
+
+--- RELEVANT CONVERSATION HISTORY (for context) ---
+{rag_context}
+--- END HISTORY ---
+
+You were asked a new question. A SQL query was executed and here are the results.
+
+Question:
+{question}
+
+SQL Query:
+{sql_query}
+
+Results (first 100 rows):
+{results}
+
+Write a concise, professional explanation of these results that directly answers the user's question.
+- If relevant, reference the conversation history to give a more contextual answer.
+- If the results are empty, say "No data was found for this request."
+- Do NOT explain SQL syntax. Focus on the business meaning of the numbers.
+- Keep it under 4 sentences.
+"""
+
+RAG_EXPLANATION_PROMPT = ChatPromptTemplate.from_template(RAG_EXPLANATION_TEMPLATE)
+
+# -----------------------------------------------------------------------------
 # SQL Generation Prompt
 # -----------------------------------------------------------------------------
 SQL_GENERATION_TEMPLATE = """You are an expert PostgreSQL data analyst.

@@ -19,6 +19,9 @@ from app.db.base import Base
 from app.utils.logger import logger
 from app.api.routes import ask, auth, schema
 from app.api.routes import admin as admin_routes
+from app.api.routes import data_sources
+from app.api.routes import ask_stream
+from app.services.query_cache import query_cache
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +34,9 @@ async def lifespan(app: FastAPI):
     async with app_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         logger.info("Database tables created / verified.")
+
+    # Initialize query cache
+    await query_cache.initialize()
 
     # Seed a default admin user if no admin exists yet
     await _seed_default_admin()
@@ -87,9 +93,11 @@ app.add_middleware(
 
 # Include API routers
 app.include_router(ask.router)
+app.include_router(ask_stream.router)
 app.include_router(auth.router)
 app.include_router(schema.router)
 app.include_router(admin_routes.router)
+app.include_router(data_sources.router)
 
 
 # ---------------------------------------------------------------------------
