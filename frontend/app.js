@@ -344,9 +344,7 @@ function createStreamingCard() {
     </div>
 
     <!-- Explanation — tokens are appended here character-by-character -->
-    <p class="explanation-text" id="${expId}">
-      <span class="stream-cursor">▋</span>
-    </p>
+    <p class="explanation-text" id="${expId}"></p>
 
     <!-- Chart placeholder -->
     <div id="chartbox-${cardId}" style="display:none">
@@ -429,19 +427,7 @@ function createStreamingCard() {
   function appendToken(chunk) {
     const expEl = document.getElementById(expId);
     if (!expEl) return;
-
-    // Remove the blinking cursor, append the chunk, restore cursor
-    const cursor = expEl.querySelector('.stream-cursor');
-    if (cursor) cursor.remove();
-
-    // Append a text node so HTML in the chunk is treated as plain text
     expEl.appendChild(document.createTextNode(chunk));
-
-    // Re-add cursor at the end
-    const cur = document.createElement('span');
-    cur.className = 'stream-cursor';
-    cur.textContent = '▋';
-    expEl.appendChild(cur);
   }
 
   // ── setError: replace card content with an error message ────────

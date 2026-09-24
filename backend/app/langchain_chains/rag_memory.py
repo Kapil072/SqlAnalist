@@ -11,6 +11,14 @@ Flow
 1. User asks a question  →  retrieve relevant past turns via FAISS
 2. Inject retrieved context into the LLM prompt
 3. After the LLM answers  →  embed & store the new (question, answer) pair
+
+Performance notes
+-----------------
+- The SentenceTransformer model is loaded once and shared across all sessions.
+- Call `warmup()` at app startup to pay the cold-load cost before the first
+  real request arrives (avoids a 3-5s spike on the first question).
+- `add()` and `retrieve()` run the CPU-bound encode() synchronously.
+  Call them via asyncio.to_thread() from async contexts.
 """
 
 from __future__ import annotations
@@ -58,6 +66,16 @@ def _get_embed_model():
     return _embed_model
 
 
+def warmup() -> None:
+    """
+    Pre-load the embedding model and run one dummy encode.
+    Call this once at app startup so the first real request is fast.
+    """
+    _load_libs()
+    model = _get_embed_model()
+    model.encode(["warmup"], convert_to_numpy=True)
+
+
 def _embed(texts: List[str]):
     """Return a (n, dim) float32 numpy array."""
     _load_libs()
@@ -89,7 +107,7 @@ class SessionRAG:
     # ------------------------------------------------------------------
 
     def add(self, question: str, answer: str) -> None:
-        """Embed and store a completed Q&A pair."""
+        """Embed and store a completed Q&A pair. CPU-bound — use to_thread."""
         _load_libs()
         payload = f"Q: {question}\nA: {answer}"
         vec = _embed([payload])  # shape (1, dim)
@@ -106,6 +124,7 @@ class SessionRAG:
         """
         Return the top-k most relevant past Q&A snippets for *query*.
         Returns an empty list if the index is empty.
+        CPU-bound — use to_thread when calling from async code.
         """
         with self._lock:
             if self._index is None or self._index.ntotal == 0:

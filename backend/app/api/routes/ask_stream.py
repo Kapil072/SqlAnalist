@@ -26,21 +26,20 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core.security import get_current_user
+from app.core.security import decode_token
 from app.db.executor import execute_safe_query, QueryResult
 from app.db.schema_registry import get_schema
-from app.db.session import get_db
+from app.db.session import AsyncSessionLocal
 from app.langchain_chains.prompts import SQL_GENERATION_PROMPT, RAG_EXPLANATION_PROMPT
 from app.langchain_chains.rag_memory import get_session_rag
 from app.models.data_source import DataSource
-from app.models.user import User
 from app.services.connection_manager import ConnectionManager
 from app.sql_safety.validator import validate_sql
 from app.utils.logger import logger
@@ -56,6 +55,57 @@ class AskStreamRequest(BaseModel):
     question: str
     session_id: Optional[str] = None        # client-supplied or auto-generated
     data_source_id: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Inline auth helper for streaming routes
+# ---------------------------------------------------------------------------
+
+async def _authenticate(request: Request) -> str:
+    """
+    Extract and validate the Bearer JWT from the request headers.
+    Returns the user_id (sub claim) on success.
+    Raises HTTP 401 on any failure.
+
+    We do this inline instead of using Depends(get_current_user) because
+    FastAPI's dependency injection doesn't compose cleanly with
+    StreamingResponse — the DB session lifetime and header parsing can
+    behave unexpectedly when the route returns a generator.
+    """
+    import jwt as _jwt
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authentication token")
+
+    token_str = auth_header[len("Bearer "):]
+    try:
+        payload = decode_token(token_str)
+    except _jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except _jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=401, detail="Invalid token type")
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token missing subject")
+
+    # Verify user exists and is active using a short-lived DB session
+    from app.models.user import User
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User).where(User.id == uuid.UUID(user_id))
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise HTTPException(status_code=401, detail="User not found")
+        if not user.is_active:
+            raise HTTPException(status_code=403, detail="Account is deactivated")
+
+    return user_id
 
 
 # ---------------------------------------------------------------------------
@@ -192,18 +242,21 @@ async def _stream_response(
     question: str,
     session_id: str,
     data_source_id: Optional[str],
-    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     """
     Core async generator that drives the SSE stream.
     Yields SSE-formatted strings.
+
+    All CPU-bound and blocking I/O operations are offloaded to
+    asyncio.to_thread() so the event loop is never blocked.
     """
+    import asyncio
 
     # ------------------------------------------------------------------
-    # 0. RAG – retrieve relevant history
+    # 0. RAG – retrieve relevant history (CPU-bound encode → thread)
     # ------------------------------------------------------------------
     rag = get_session_rag(session_id)
-    past_turns = rag.retrieve(question, top_k=3)
+    past_turns: List[str] = await asyncio.to_thread(rag.retrieve, question, 3)
     rag_context = (
         "\n\n".join(past_turns)
         if past_turns
@@ -219,10 +272,11 @@ async def _stream_response(
     if data_source_id:
         try:
             ds_uuid = uuid.UUID(data_source_id)
-            result = await db.execute(
-                select(DataSource).where(DataSource.id == ds_uuid)
-            )
-            data_source = result.scalar_one_or_none()
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(DataSource).where(DataSource.id == ds_uuid)
+                )
+                data_source = result.scalar_one_or_none()
             if not data_source:
                 yield _sse("error", {"detail": "Data source not found"})
                 return
@@ -242,25 +296,29 @@ async def _stream_response(
             return
 
     # ------------------------------------------------------------------
-    # 2. SQL generation
+    # 2. SQL generation (blocking Groq HTTP call → thread)
     # ------------------------------------------------------------------
-    generated_sql = _groq_sql(question)
+    generated_sql: Optional[str] = await asyncio.to_thread(_groq_sql, question)
     engine_used = "groq-llm"
     if not generated_sql:
         generated_sql = _fallback_sql(question)
         engine_used = "analytics-engine"
 
     # ------------------------------------------------------------------
-    # 3. Safety validation
+    # 3. Safety validation (pure CPU → thread)
     # ------------------------------------------------------------------
     try:
-        validated_sql = validate_sql(generated_sql, dialect=dialect)
+        validated_sql: str = await asyncio.to_thread(
+            validate_sql, generated_sql, dialect
+        )
     except Exception as val_err:
         yield _sse("error", {"detail": f"Safety Check Failed: {val_err}"})
         return
 
     # ------------------------------------------------------------------
     # 4. Execute query
+    #    - Dynamic data source: already async via SQLAlchemy async engine
+    #    - Default target DB:   blocking call → thread
     # ------------------------------------------------------------------
     try:
         if data_source:
@@ -293,14 +351,17 @@ async def _stream_response(
                     truncated=truncated,
                 )
         else:
-            res: QueryResult = execute_safe_query(validated_sql)
+            # execute_safe_query is synchronous — offload to thread
+            res: QueryResult = await asyncio.to_thread(
+                execute_safe_query, validated_sql
+            )
     except Exception as exec_err:
         logger.error(f"[STREAM] Execution error: {exec_err}")
         yield _sse("error", {"detail": f"Database Execution Error: {exec_err}"})
         return
 
     # ------------------------------------------------------------------
-    # 5. Send metadata frame — client can render table/chart immediately
+    # 5. Send metadata frame immediately — client renders table/chart now
     # ------------------------------------------------------------------
     chart = _infer_chart(res.columns, res.rows)
     yield _sse("meta", {
@@ -317,6 +378,9 @@ async def _stream_response(
 
     # ------------------------------------------------------------------
     # 6. Stream explanation tokens via Groq
+    #    The Groq streaming iterator is blocking (sync HTTP).
+    #    We run it in a thread and pipe tokens back via an asyncio.Queue
+    #    so the event loop stays free between chunks.
     # ------------------------------------------------------------------
     key = settings.groq_api_key.strip()
     full_explanation = ""
@@ -325,9 +389,6 @@ async def _stream_response(
         try:
             from groq import Groq
 
-            client = Groq(api_key=key, base_url=settings.llm_base_url)
-
-            # Build the RAG-augmented explanation prompt
             results_preview = json.dumps(
                 {"columns": res.columns, "rows": res.rows[:20]},
                 default=str,
@@ -339,28 +400,48 @@ async def _stream_response(
                 results=results_preview,
             )
 
-            # Groq streaming
-            stream = client.chat.completions.create(
-                model=settings.llm_model,
-                messages=[{"role": "user", "content": prompt_text}],
-                temperature=0.3,
-                max_tokens=300,
-                stream=True,
-            )
+            # Use a sentinel to signal end-of-stream from the thread
+            _DONE = object()
+            token_queue: asyncio.Queue = asyncio.Queue()
+            loop = asyncio.get_event_loop()
 
-            for chunk in stream:
-                delta = chunk.choices[0].delta
-                token = getattr(delta, "content", None) or ""
-                if token:
-                    full_explanation += token
-                    yield _sse("token", {"token": token})
+            def _run_groq_stream():
+                """Runs in a worker thread. Puts tokens into the queue."""
+                try:
+                    client = Groq(api_key=key, base_url=settings.llm_base_url)
+                    stream = client.chat.completions.create(
+                        model=settings.llm_model,
+                        messages=[{"role": "user", "content": prompt_text}],
+                        temperature=0.3,
+                        max_tokens=300,
+                        stream=True,
+                    )
+                    for chunk in stream:
+                        delta = chunk.choices[0].delta
+                        token = getattr(delta, "content", None) or ""
+                        if token:
+                            loop.call_soon_threadsafe(token_queue.put_nowait, token)
+                except Exception as e:
+                    logger.warning(f"[STREAM] Groq thread error: {e}")
+                finally:
+                    loop.call_soon_threadsafe(token_queue.put_nowait, _DONE)
+
+            # Start the blocking Groq call in a thread
+            asyncio.get_event_loop().run_in_executor(None, _run_groq_stream)
+
+            # Drain the queue asynchronously — event loop is free between gets
+            while True:
+                item = await token_queue.get()
+                if item is _DONE:
+                    break
+                full_explanation += item
+                yield _sse("token", {"token": item})
 
         except Exception as stream_err:
-            logger.warning(f"[STREAM] Groq streaming failed: {stream_err}")
-            # Fall through to static explanation below
+            logger.warning(f"[STREAM] Groq streaming setup failed: {stream_err}")
 
     # ------------------------------------------------------------------
-    # 7. Fallback static explanation if streaming failed or no key
+    # 7. Static fallback explanation if Groq didn't produce anything
     # ------------------------------------------------------------------
     if not full_explanation:
         if not res.rows:
@@ -379,18 +460,14 @@ async def _stream_response(
                 f"Top result: '{label}' with "
                 f"{res.columns[-1].replace('_', ' ')} of {top[-1]}."
             )
-        # Emit the static explanation as a single token so the frontend
-        # animation still fires
         yield _sse("token", {"token": full_explanation})
 
     # ------------------------------------------------------------------
-    # 8. Store this turn in the in-memory RAG store
+    # 8. Store turn in RAG (CPU-bound encode → thread, fire-and-forget)
     # ------------------------------------------------------------------
-    try:
-        rag.add(question, full_explanation)
-    except Exception as rag_err:
-        # Non-fatal — RAG storage failure should not break the response
-        logger.warning(f"[STREAM] RAG store failed: {rag_err}")
+    asyncio.ensure_future(
+        asyncio.to_thread(rag.add, question, full_explanation)
+    )
 
     # ------------------------------------------------------------------
     # 9. Done frame
@@ -407,9 +484,8 @@ async def _stream_response(
 
 @router.post("/ask/stream")
 async def ask_stream(
+    request: Request,
     body: AskStreamRequest,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ):
     """
     Streaming Text-to-SQL endpoint.
@@ -422,11 +498,14 @@ async def ask_stream(
     done   – final explanation + RAG store size
     error  – detail string (stream ends after this)
     """
+    # Auth is validated eagerly before opening the stream so the client
+    # gets a clean HTTP 401 instead of a broken SSE connection.
+    await _authenticate(request)
+
     question = body.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    # Assign a session_id — client should persist and re-send this across turns
     session_id = body.session_id or str(uuid.uuid4())
 
     return StreamingResponse(
@@ -434,11 +513,9 @@ async def ask_stream(
             question=question,
             session_id=session_id,
             data_source_id=body.data_source_id,
-            db=db,
         ),
         media_type="text/event-stream",
         headers={
-            # Prevent proxies / nginx from buffering the stream
             "X-Accel-Buffering": "no",
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",

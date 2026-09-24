@@ -38,6 +38,25 @@ async def lifespan(app: FastAPI):
     # Initialize query cache
     await query_cache.initialize()
 
+    # Introspect the target DB and rebuild schema_cache.json.
+    # Runs in a thread because SQLAlchemy's inspect() is synchronous.
+    import asyncio
+    from app.db.schema_registry import refresh_schema
+    try:
+        schema = await asyncio.to_thread(refresh_schema)
+        logger.info(f"[SCHEMA] Auto-refresh at startup: {list(schema.get('tables', {}).keys())}")
+    except Exception as e:
+        logger.warning(f"[SCHEMA] Startup schema refresh failed (non-fatal): {e}")
+
+    # Pre-warm the RAG embedding model in a thread so the first real
+    # request doesn't pay the 3-5s cold-load cost.
+    from app.langchain_chains.rag_memory import warmup as rag_warmup
+    try:
+        await asyncio.to_thread(rag_warmup)
+        logger.info("[RAG] Embedding model warmed up.")
+    except Exception as e:
+        logger.warning(f"[RAG] Warmup failed (non-fatal): {e}")
+
     # Seed a default admin user if no admin exists yet
     await _seed_default_admin()
 
