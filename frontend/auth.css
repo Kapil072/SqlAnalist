@@ -175,17 +175,30 @@ html, body {
 /* ── Alert ──────────────────────────────────────────────────── */
 
 .auth-alert {
-  padding: 0.75rem 1rem;
+  padding: 0.85rem 1rem;
   border-radius: 10px;
   font-size: 0.875rem;
   margin-bottom: 1rem;
   border: 1px solid transparent;
   animation: fadeIn 0.25s ease;
+  line-height: 1.5;
 }
 
-.auth-alert.error   { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.3); color: #fca5a5; }
-.auth-alert.success { background: rgba(16,185,129,0.12); border-color: rgba(16,185,129,0.3); color: #6ee7b7; }
-.auth-alert.info    { background: rgba(99,102,241,0.12); border-color: rgba(99,102,241,0.3); color: #a5b4fc; }
+.auth-alert.error   {
+  background: #fff1f2;
+  border-color: #fecdd3;
+  color: #b91c1c;
+}
+.auth-alert.success {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+.auth-alert.info    {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
 
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(-6px); }
@@ -399,4 +412,52 @@ html, body {
   font-size: 0.78rem;
   color: #334155;
   text-align: center;
+}
+
+/* ── OTP digit boxes ───────────────────────────────────────────── */
+.otp-box-row {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin: 24px 0 28px;
+}
+
+.otp-digit {
+  width: 48px;
+  height: 58px;
+  text-align: center;
+  font-size: 1.6rem;
+  font-weight: 700;
+  border: 2px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #0f172a;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  caret-color: transparent;
+}
+
+.otp-digit:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+  background: #fff;
+}
+
+.otp-digit.filled {
+  border-color: #6366f1;
+  background: #eef2ff;
+  color: #4338ca;
+}
+
+.otp-digit.error {
+  border-color: #ef4444;
+  background: #fff1f2;
+  color: #b91c1c;
+  animation: otp-shake 0.3s ease;
+}
+
+@keyframes otp-shake {
+  0%, 100% { transform: translateX(0); }
+  25%       { transform: translateX(-4px); }
+  75%       { transform: translateX(4px); }
 }

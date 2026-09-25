@@ -123,6 +123,43 @@
         <p class="switch-hint">Already have an account? <button type="button" class="link-btn" onclick="switchAuthTab('login')">Sign in</button></p>
       </form>
 
+      <!-- OTP VERIFICATION FORM (shown after register) -->
+      <form id="form-otp" class="auth-form" onsubmit="handleVerifyOTP(event)" style="display:none;">
+        <div class="forgot-header">
+          <div class="forgot-icon">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+              <polyline points="22,6 12,13 2,6"/>
+            </svg>
+          </div>
+          <h2>Check your email</h2>
+          <p id="otp-hint-email">We sent a 6-digit code to your email.<br>It expires in 10 minutes.</p>
+        </div>
+
+        <!-- 6 individual digit boxes -->
+        <div class="otp-box-row" id="otp-box-row">
+          <input class="otp-digit" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" />
+          <input class="otp-digit" maxlength="1" inputmode="numeric" pattern="[0-9]" />
+          <input class="otp-digit" maxlength="1" inputmode="numeric" pattern="[0-9]" />
+          <input class="otp-digit" maxlength="1" inputmode="numeric" pattern="[0-9]" />
+          <input class="otp-digit" maxlength="1" inputmode="numeric" pattern="[0-9]" />
+          <input class="otp-digit" maxlength="1" inputmode="numeric" pattern="[0-9]" />
+        </div>
+
+        <button type="submit" class="auth-btn" id="btn-otp">
+          <span class="btn-text">Verify & Sign In</span>
+          <span class="btn-spinner" style="display:none;"></span>
+        </button>
+
+        <p class="switch-hint">
+          Didn't receive it?
+          <button type="button" class="link-btn" onclick="handleResendOTP()">Resend code</button>
+        </p>
+        <p class="switch-hint">
+          <button type="button" class="link-btn" onclick="switchAuthTab('register')">&#8592; Back</button>
+        </p>
+      </form>
+
       <!-- FORGOT PASSWORD FORM -->
       <form id="form-forgot" class="auth-form" onsubmit="handleForgot(event)" style="display:none;">
         <div class="forgot-header">

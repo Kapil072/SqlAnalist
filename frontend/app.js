@@ -1,12 +1,14 @@
-// SQLAnalyst Client Logic
+/* ============================================================
+   SQLAnalyst — Main App JS
+   Teal theme · Streaming SSE · In-memory RAG · DB chat history
+   ============================================================ */
+
+const API = 'http://localhost:8000';
 let activeTab = 'chat';
 let chartInstances = {};
-
-// Session ID persisted for the lifetime of the browser tab so RAG
-// context accumulates across questions in the same conversation.
 let chatSessionId = sessionStorage.getItem('sqlanalyst_session_id') || null;
 
-/* ── Auth helpers ──────────────────────────────────────────── */
+/* ── Auth helpers ─────────────────────────────────────────── */
 function getToken() { return localStorage.getItem('sqlanalyst_token'); }
 function getUser()  {
   try { return JSON.parse(localStorage.getItem('sqlanalyst_user')); }
@@ -20,14 +22,12 @@ function authFetch(url, opts = {}) {
   return fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) } });
 }
 
+/* ── Boot ─────────────────────────────────────────────────── */
 function initAuth() {
   const token = getToken();
   const user  = getUser();
-  if (!token || !user) {
-    window.location.href = '/auth.html';
-    return false;
-  }
-  // Populate user nav
+  if (!token || !user) { window.location.href = '/auth.html'; return false; }
+
   const nameEl   = document.getElementById('nav-user-name');
   const roleEl   = document.getElementById('nav-user-role');
   const adminBtn = document.getElementById('nav-admin-link');
@@ -39,70 +39,63 @@ function initAuth() {
   return true;
 }
 
+document.addEventListener('DOMContentLoaded', () => {
+  if (!initAuth()) return;
+  loadSchema();
+  checkHealth();
+  loadChatHistory();
+
+  const sqlEditor = document.getElementById('sql-editor');
+  if (sqlEditor) {
+    sqlEditor.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault(); executeCustomSql();
+      }
+    });
+  }
+});
+
+/* ── User dropdown ────────────────────────────────────────── */
+function toggleUserDropdown() {
+  document.getElementById('user-dropdown')?.classList.toggle('open');
+}
+document.addEventListener('click', e => {
+  const menu = document.getElementById('user-menu');
+  if (menu && !menu.contains(e.target)) {
+    document.getElementById('user-dropdown')?.classList.remove('open');
+  }
+});
+
 function handleLogout() {
-  fetch('http://localhost:8000/auth/logout', { method: 'POST', headers: authHeaders() }).finally(() => {
+  fetch(API + '/auth/logout', { method: 'POST', headers: authHeaders() }).finally(() => {
     localStorage.removeItem('sqlanalyst_token');
     localStorage.removeItem('sqlanalyst_user');
     window.location.href = '/auth.html';
   });
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  if (!initAuth()) return;
-  loadSchema();
-  checkHealth();
-
-  // Ctrl+Enter shortcut in SQL editor
-  const sqlEditor = document.getElementById('sql-editor');
-  if (sqlEditor) {
-    sqlEditor.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-        e.preventDefault();
-        executeCustomSql();
-      }
-    });
-  }
-});
-
-// Toggle user dropdown menu
-function toggleUserDropdown() {
-  const dd = document.getElementById('user-dropdown');
-  if (dd) dd.classList.toggle('open');
-}
-// Close dropdown when clicking outside
-document.addEventListener('click', (e) => {
-  const menu = document.getElementById('user-menu');
-  if (menu && !menu.contains(e.target)) {
-    const dd = document.getElementById('user-dropdown');
-    if (dd) dd.classList.remove('open');
-  }
-});
-
-// Check API Health
+/* ── Health check ─────────────────────────────────────────── */
 async function checkHealth() {
   try {
-    const res = await authFetch('http://localhost:8000/health');
+    const res  = await authFetch(API + '/health');
     const data = await res.json();
     const pill = document.getElementById('db-status-pill');
     const text = document.getElementById('db-status-text');
-
     if (data.status === 'healthy' && data.target_db?.connected) {
-      pill.style.borderColor = 'rgba(16, 185, 129, 0.35)';
-      pill.style.background = '#ecfdf5';
-      pill.style.color = '#065f46';
-      text.textContent = `MySQL ${data.target_db.version || '8.0'} @ localhost:3306`;
+      pill.style.background  = 'var(--teal-lightest)';
+      pill.style.borderColor = 'var(--border-subtle)';
+      pill.style.color       = 'var(--teal-dark)';
+      text.textContent = `MySQL ${data.target_db.version?.split('-')[0] || '8.0'} · connected`;
     } else {
-      pill.style.borderColor = 'rgba(244, 63, 94, 0.35)';
-      pill.style.background = '#fff1f2';
-      pill.style.color = '#9f1239';
-      text.textContent = 'MySQL Disconnected';
+      pill.style.background  = '#fff1f2';
+      pill.style.borderColor = '#fecdd3';
+      pill.style.color       = '#b91c1c';
+      text.textContent = 'DB disconnected';
     }
-  } catch (err) {
-    console.error('Health check error:', err);
-  }
+  } catch {}
 }
 
-// Switch between AI Chat and Raw SQL Console
+/* ── Tab switching ────────────────────────────────────────── */
 function switchTab(tab) {
   activeTab = tab;
   document.getElementById('tab-chat').classList.toggle('active', tab === 'chat');
@@ -111,15 +104,16 @@ function switchTab(tab) {
   document.getElementById('view-sql').classList.toggle('active', tab === 'sql');
 }
 
-// Fetch Live Database Schema and Suggestions
+/* ── Schema ───────────────────────────────────────────────── */
 async function loadSchema() {
-  const container = document.getElementById('schema-list-container');
-  const chipsContainer = document.getElementById('suggestion-chips');
-  const totalRecElem = document.getElementById('total-records-count');
-  const tableBadge = document.getElementById('table-count-badge');
+  const container   = document.getElementById('schema-list-container');
+  const tableBadge  = document.getElementById('table-count-badge');
+  const totalRecEl  = document.getElementById('total-records-count');
+  const dbNameEl    = document.getElementById('meta-db-name');
+  const consoleDbEl = document.getElementById('console-db-name');
 
   try {
-    const res = await authFetch('http://localhost:8000/api/schema');
+    const res  = await authFetch(API + '/api/schema');
     const data = await res.json();
 
     if (!data.tables || data.tables.length === 0) {
@@ -127,74 +121,130 @@ async function loadSchema() {
       return;
     }
 
-    tableBadge.textContent = `${data.tables.length} Tables`;
-    let totalRecords = 0;
+    tableBadge.textContent = data.tables.length + ' Tables';
+    let totalRows = 0;
     container.innerHTML = '';
 
-    data.tables.forEach((tbl) => {
-      totalRecords += (tbl.row_count || 0);
+    // Try to get DB name from first table's engine info or fall back to URL hint
+    const dbName = 'analytics';
+    if (dbNameEl)    dbNameEl.textContent   = dbName;
+    if (consoleDbEl) consoleDbEl.textContent = dbName;
+
+    data.tables.forEach(tbl => {
+      totalRows += tbl.row_count || 0;
 
       const card = document.createElement('div');
       card.className = 'table-card';
+
+      const colRows = (tbl.columns || []).map(c => `
+        <div class="column-item">
+          <span class="col-name">${c.name}</span>
+          <span class="col-type">${(c.type || '').split('(')[0]}</span>
+        </div>`).join('');
+
       card.innerHTML = `
         <div class="table-header" onclick="this.parentElement.classList.toggle('open')">
           <div class="table-name-group">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-blue-500"><path d="M4 6h16M4 12h16M4 18h16"></path></svg>
-            <span>${tbl.name}</span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
+            ${tbl.name}
           </div>
           <span class="table-row-count">${(tbl.row_count || 0).toLocaleString()} rows</span>
         </div>
-        <div class="table-columns-list">
-          ${tbl.columns.map(c => `
-            <div class="column-item">
-              <span class="col-name">${c.name}</span>
-              <span class="col-type">${c.type.split('(')[0]}</span>
-            </div>
-          `).join('')}
-        </div>
-      `;
+        <div class="table-columns-list">${colRows}</div>`;
+
       container.appendChild(card);
     });
 
-    totalRecElem.textContent = `${totalRecords.toLocaleString()} rows`;
-
-    // Populate suggestions
-    if (data.suggestions && chipsContainer) {
-      chipsContainer.innerHTML = '';
-      data.suggestions.forEach(s => {
-        const btn = document.createElement('button');
-        btn.className = 'chip-btn';
-        btn.innerHTML = `<span class="flex items-center justify-between"><span>${s}</span><svg class="w-3.5 h-3.5 text-blue-500 ml-1.5 opacity-60 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg></span>`;
-        btn.onclick = () => runSamplePrompt(s);
-        chipsContainer.appendChild(btn);
-      });
-    }
+    if (totalRecEl) totalRecEl.textContent = totalRows.toLocaleString();
 
   } catch (err) {
-    console.error('Error loading schema:', err);
     container.innerHTML = '<div class="empty-state">Failed to load schema.</div>';
   }
 }
 
-// Clear Chat Session
+async function refreshSchema() {
+  const btn = document.getElementById('btn-refresh-schema') ||
+              document.querySelector('[onclick="refreshSchema()"]');
+  if (btn) btn.style.opacity = '0.5';
+  try {
+    await authFetch(API + '/api/schema/refresh', { method: 'POST' });
+    await loadSchema();
+  } finally {
+    if (btn) btn.style.opacity = '1';
+  }
+}
+
+/* ── Chat history (DB) ────────────────────────────────────── */
+async function loadChatHistory() {
+  try {
+    const res  = await authFetch(API + '/chat/history?limit=30');
+    if (!res.ok) return;
+    const data = await res.json();
+    renderHistorySidebar(data.messages || []);
+  } catch {}
+}
+
+function renderHistorySidebar(messages) {
+  const section = document.getElementById('history-section');
+  const list    = document.getElementById('history-list');
+  if (!section || !list) return;
+
+  if (!messages.length) { section.style.display = 'none'; return; }
+
+  section.style.display = '';
+  list.innerHTML = messages.map(m => {
+    const d   = new Date(m.created_at);
+    const ago = _timeAgo(d);
+    return `
+      <div class="history-item" onclick="runSamplePrompt(${JSON.stringify(m.question)})" title="${escapeHtml(m.question)}">
+        <div class="history-question">${escapeHtml(m.question)}</div>
+        <div class="history-time">${ago}</div>
+      </div>`;
+  }).join('');
+}
+
+function _timeAgo(date) {
+  const secs = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (secs < 60)   return 'just now';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+  return Math.floor(secs / 86400) + 'd ago';
+}
+
+async function saveMessageToDB(question, sqlQuery, explanation, engineUsed) {
+  try {
+    await authFetch(API + '/chat/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question,
+        sql_query:   sqlQuery   || null,
+        explanation: explanation || null,
+        engine_used: engineUsed  || null,
+        session_id:  chatSessionId || null,
+      }),
+    });
+  } catch {}
+}
+
+/* ── Clear chat ───────────────────────────────────────────── */
 function clearChat() {
   document.getElementById('chat-messages').innerHTML = '';
   document.getElementById('welcome-hero').style.display = 'flex';
-  // Reset in-memory RAG session so history is wiped on the server too
   chatSessionId = null;
   sessionStorage.removeItem('sqlanalyst_session_id');
 }
 
-// Run a prompt directly
+/* ── Run a sample prompt ──────────────────────────────────── */
 function runSamplePrompt(question) {
   switchTab('chat');
   document.getElementById('user-input').value = question;
   document.getElementById('chat-form').requestSubmit();
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Streaming question handler  (replaces the old handleSendQuestion)
-// ─────────────────────────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════
+   Streaming question handler
+   ══════════════════════════════════════════════════════════════ */
 async function handleSendQuestion(e) {
   e.preventDefault();
 
@@ -208,25 +258,20 @@ async function handleSendQuestion(e) {
   appendUserMessage(question);
   input.value   = '';
   btn.disabled  = true;
-  sendText.textContent = 'Analyzing…';
+  sendText.textContent = 'Thinking…';
   scrollToBottom();
 
-  // Create the assistant card immediately (skeleton state)
-  const { cardEl, chartId, setMeta, appendToken, setError } =
+  const { cardEl, chartId, setMeta, appendToken, setError, finalize } =
     createStreamingCard();
   document.getElementById('chat-messages').appendChild(cardEl);
   scrollToBottom();
 
-  try {
-    const token   = getToken();
-    const headers = {
-      'Content-Type': 'application/json',
-      ...(token ? { 'Authorization': 'Bearer ' + token } : {}),
-    };
+  let finalData = {};
 
-    const response = await fetch('http://localhost:8000/ask/stream', {
-      method:  'POST',
-      headers,
+  try {
+    const response = await fetch(API + '/ask/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({
         question,
         session_id: chatSessionId || undefined,
@@ -238,7 +283,6 @@ async function handleSendQuestion(e) {
       throw new Error(err.detail || 'Stream request failed');
     }
 
-    // ── Read the SSE stream ──────────────────────────────────────
     const reader  = response.body.getReader();
     const decoder = new TextDecoder();
     let   buffer  = '';
@@ -248,37 +292,25 @@ async function handleSendQuestion(e) {
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-
-      // SSE frames are separated by double newlines
       const frames = buffer.split('\n\n');
-      buffer = frames.pop(); // keep incomplete last frame
+      buffer = frames.pop();
 
       for (const frame of frames) {
         if (!frame.trim()) continue;
-
-        // Parse "event: xxx\ndata: yyy"
-        let eventName = 'message';
-        let dataStr   = '';
-
+        let eventName = 'message', dataStr = '';
         for (const line of frame.split('\n')) {
-          if (line.startsWith('event:')) {
-            eventName = line.slice(6).trim();
-          } else if (line.startsWith('data:')) {
-            dataStr = line.slice(5).trim();
-          }
+          if (line.startsWith('event:')) eventName = line.slice(6).trim();
+          else if (line.startsWith('data:')) dataStr = line.slice(5).trim();
         }
-
         let payload;
-        try { payload = JSON.parse(dataStr); }
-        catch { payload = dataStr; }
+        try { payload = JSON.parse(dataStr); } catch { payload = dataStr; }
 
-        // ── Dispatch by event type ───────────────────────────────
         if (eventName === 'meta') {
-          // Server confirmed session_id — store it for future turns
           if (payload.session_id) {
             chatSessionId = payload.session_id;
             sessionStorage.setItem('sqlanalyst_session_id', chatSessionId);
           }
+          finalData.meta = payload;
           setMeta(payload, chartId);
           scrollToBottom();
 
@@ -287,7 +319,7 @@ async function handleSendQuestion(e) {
           scrollToBottom();
 
         } else if (eventName === 'done') {
-          // Stream finished — nothing extra to do; card is already complete
+          finalData.explanation = payload.explanation || '';
           scrollToBottom();
 
         } else if (eventName === 'error') {
@@ -295,6 +327,21 @@ async function handleSendQuestion(e) {
           scrollToBottom();
         }
       }
+    }
+
+    // Remove "Thinking…" cursor after stream ends
+    finalize();
+
+    // Save to DB
+    if (finalData.meta) {
+      await saveMessageToDB(
+        question,
+        finalData.meta.sql_query,
+        finalData.explanation,
+        finalData.meta.engine_used,
+      );
+      // Refresh sidebar history
+      loadChatHistory();
     }
 
   } catch (err) {
@@ -306,10 +353,7 @@ async function handleSendQuestion(e) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Build a streaming assistant card
-// Returns helpers to progressively fill the card.
-// ─────────────────────────────────────────────────────────────────
+/* ── Build a streaming assistant card ────────────────────── */
 function createStreamingCard() {
   const cardId  = 'card-' + Date.now();
   const chartId = 'chart-' + Date.now();
@@ -322,100 +366,77 @@ function createStreamingCard() {
   div.innerHTML = `
     <div class="assistant-header">
       <div class="assistant-tag">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" stroke-width="2.2">
-          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83
-                   M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
         </svg>
-        <span>SQLAnalyst Intelligence</span>
+        SQLAnalyst
       </div>
       <div class="assistant-metrics" id="metrics-${cardId}">
-        <span class="metric-pill stream-thinking">Thinking…</span>
+        <span class="metric-pill stream-thinking">Generating…</span>
       </div>
     </div>
 
-    <!-- SQL block (hidden until meta arrives) -->
     <div class="sql-box" id="sqlbox-${cardId}" style="display:none">
       <div class="sql-box-header">
         <span>SQL Query</span>
-        <button class="copy-btn" onclick="copySql('${cardId}')">Copy SQL</button>
+        <button class="copy-btn" onclick="copySql('${cardId}')">Copy</button>
       </div>
       <pre class="sql-code" id="code-${cardId}"></pre>
     </div>
 
-    <!-- Explanation — tokens are appended here character-by-character -->
     <p class="explanation-text" id="${expId}"></p>
 
-    <!-- Chart placeholder -->
     <div id="chartbox-${cardId}" style="display:none">
       <div class="chart-card">
         <div class="chart-title" id="charttitle-${cardId}"></div>
-        <div class="chart-canvas-box">
-          <canvas id="${chartId}"></canvas>
-        </div>
+        <div class="chart-canvas-box"><canvas id="${chartId}"></canvas></div>
       </div>
     </div>
 
-    <!-- Data table placeholder -->
     <div id="tablebox-${cardId}" style="display:none" class="table-wrapper">
       <table class="data-table">
         <thead id="thead-${cardId}"></thead>
         <tbody id="tbody-${cardId}"></tbody>
       </table>
-    </div>
-  `;
+    </div>`;
 
-  // ── setMeta: called once when [event: meta] arrives ─────────────
+  /* setMeta — called once on [event: meta] */
   function setMeta(data, cId) {
-    // Metrics pill row
+    // Metrics (no RAG pill)
     const metricsEl = document.getElementById('metrics-' + cardId);
     if (metricsEl) {
       metricsEl.innerHTML = `
         <span class="metric-pill">${data.timing_ms}ms</span>
         <span class="metric-pill">${data.row_count} rows</span>
-        <span class="metric-pill success">Safe Query</span>
-        ${data.rag_turns_used > 0
-          ? `<span class="metric-pill rag-pill" title="RAG context from ${data.rag_turns_used} past turn(s)">
-               🧠 RAG ×${data.rag_turns_used}
-             </span>`
-          : ''}
-      `;
+        <span class="metric-pill success">Safe</span>`;
     }
 
     // SQL box
-    const sqlBox  = document.getElementById('sqlbox-' + cardId);
-    const codeEl  = document.getElementById('code-'   + cardId);
+    const sqlBox = document.getElementById('sqlbox-' + cardId);
+    const codeEl = document.getElementById('code-'   + cardId);
     if (sqlBox && codeEl) {
       codeEl.textContent = data.sql_query;
       sqlBox.style.display = '';
     }
 
-    // Data table
-    if (data.columns && data.columns.length) {
+    // Table
+    if (data.columns?.length) {
       const thead = document.getElementById('thead-' + cardId);
       const tbody = document.getElementById('tbody-' + cardId);
       const tbox  = document.getElementById('tablebox-' + cardId);
-
-      if (thead) {
-        thead.innerHTML =
-          '<tr>' + data.columns.map(c => `<th>${escapeHtml(c)}</th>`).join('') + '</tr>';
-      }
-      if (tbody) {
-        tbody.innerHTML = data.rows.slice(0, 15).map(row =>
-          '<tr>' + row.map(val =>
-            `<td>${val !== null && val !== undefined
-              ? escapeHtml(String(val))
-              : '<span style="color:#94a3b8">NULL</span>'
-            }</td>`
-          ).join('') + '</tr>'
-        ).join('');
-      }
+      if (thead) thead.innerHTML =
+        '<tr>' + data.columns.map(c => `<th>${escapeHtml(c)}</th>`).join('') + '</tr>';
+      if (tbody) tbody.innerHTML = data.rows.slice(0, 15).map(row =>
+        '<tr>' + row.map(val =>
+          `<td>${val !== null && val !== undefined ? escapeHtml(String(val)) : '<span style="color:#7aacac">NULL</span>'}</td>`
+        ).join('') + '</tr>'
+      ).join('');
       if (tbox) tbox.style.display = '';
     }
 
     // Chart
-    if (data.chart && data.columns && data.rows) {
-      const chartbox   = document.getElementById('chartbox-'  + cardId);
+    if (data.chart && data.columns?.length && data.rows?.length) {
+      const chartbox   = document.getElementById('chartbox-'   + cardId);
       const chartTitle = document.getElementById('charttitle-' + cardId);
       if (chartTitle) chartTitle.textContent = data.chart.title || '';
       if (chartbox)   chartbox.style.display = '';
@@ -423,155 +444,75 @@ function createStreamingCard() {
     }
   }
 
-  // ── appendToken: called for every [event: token] chunk ──────────
+  /* appendToken — called for every [event: token] */
   function appendToken(chunk) {
     const expEl = document.getElementById(expId);
-    if (!expEl) return;
-    expEl.appendChild(document.createTextNode(chunk));
+    if (expEl) expEl.appendChild(document.createTextNode(chunk));
   }
 
-  // ── setError: replace card content with an error message ────────
+  /* finalize — called after stream ends to clean up any thinking state */
+  function finalize() {
+    const metricsEl = document.getElementById('metrics-' + cardId);
+    if (metricsEl) {
+      const thinking = metricsEl.querySelector('.stream-thinking');
+      if (thinking) thinking.remove();
+    }
+  }
+
+  /* setError */
   function setError(msg) {
     div.innerHTML = `
       <div style="color:#b91c1c;font-weight:600;display:flex;align-items:center;gap:8px;">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"></circle>
-          <line x1="12" y1="8" x2="12" y2="12"></line>
-          <line x1="12" y1="16" x2="12.01" y2="16"></line>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/>
+          <line x1="12" y1="16" x2="12.01" y2="16"/>
         </svg>
         Query Error
       </div>
-      <p style="color:#7f1d1d;font-size:0.9rem;margin-top:6px;
-                background:#fff1f2;padding:10px 14px;border-radius:8px;
-                border:1px solid #fecdd3;">${escapeHtml(msg)}</p>
-    `;
+      <p style="color:#7f1d1d;font-size:0.88rem;margin-top:6px;background:#fff1f2;
+                padding:10px 14px;border-radius:8px;border:1px solid #fecdd3;">
+        ${escapeHtml(msg)}
+      </p>`;
   }
 
-  return { cardEl: div, chartId, setMeta, appendToken, setError };
+  return { cardEl: div, chartId, setMeta, appendToken, setError, finalize };
 }
 
-// Append User Bubble
+/* ── User bubble ──────────────────────────────────────────── */
 function appendUserMessage(text) {
-  const container = document.getElementById('chat-messages');
   const div = document.createElement('div');
   div.className = 'message-user';
   div.innerHTML = `<div class="user-bubble">${escapeHtml(text)}</div>`;
-  container.appendChild(div);
+  document.getElementById('chat-messages').appendChild(div);
 }
 
-// Append Assistant Result Card
-function appendAssistantMessage(data) {
-  const container = document.getElementById('chat-messages');
-  const cardId = 'card-' + Date.now();
-  const chartId = 'chart-' + Date.now();
-
-  const div = document.createElement('div');
-  div.className = 'message-assistant';
-  div.id = cardId;
-
-  // Build HTML
-  div.innerHTML = `
-    <div class="assistant-header">
-      <div class="assistant-tag">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-        <span>SQLAnalyst Intelligence</span>
-      </div>
-      <div class="assistant-metrics">
-        <span class="metric-pill">${data.timing_ms}ms</span>
-        <span class="metric-pill">${data.row_count} rows</span>
-        <span class="metric-pill success">Safe Query</span>
-      </div>
-    </div>
-
-    <!-- SQL Block -->
-    <div class="sql-box">
-      <div class="sql-box-header">
-        <span>MySQL Query</span>
-        <button class="copy-btn" onclick="copySql('${cardId}')">Copy SQL</button>
-      </div>
-      <pre class="sql-code" id="code-${cardId}">${escapeHtml(data.sql_query)}</pre>
-    </div>
-
-    <!-- Explanation -->
-    <p class="explanation-text">${escapeHtml(data.explanation)}</p>
-
-    <!-- Chart if available -->
-    ${data.chart ? `
-      <div class="chart-card">
-        <div class="chart-title">${escapeHtml(data.chart.title)}</div>
-        <div class="chart-canvas-box">
-          <canvas id="${chartId}"></canvas>
-        </div>
-      </div>
-    ` : ''}
-
-    <!-- Result Data Table -->
-    <div class="table-wrapper">
-      <table class="data-table">
-        <thead>
-          <tr>${data.columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr>
-        </thead>
-        <tbody>
-          ${data.rows.slice(0, 15).map(row => `
-            <tr>${row.map(val => `<td>${val !== null && val !== undefined ? escapeHtml(String(val)) : '<span style="color:#94a3b8">NULL</span>'}</td>`).join('')}</tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
-  `;
-
-  container.appendChild(div);
-
-  // Render chart if present
-  if (data.chart) {
-    renderChart(chartId, data);
-  }
-}
-
-// Append Error Message
-function appendErrorMessage(msg) {
-  const container = document.getElementById('chat-messages');
-  const div = document.createElement('div');
-  div.className = 'message-assistant';
-  div.innerHTML = `
-    <div style="color:#b91c1c; font-weight:600; display:flex; align-items:center; gap:8px;">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-      Query Error
-    </div>
-    <p style="color:#7f1d1d; font-size:0.9rem; margin-top:6px; background:#fff1f2; padding:10px 14px; border-radius:8px; border:1px solid #fecdd3;">${escapeHtml(msg)}</p>
-  `;
-  container.appendChild(div);
-}
-
-// Chart.js Visualization Renderer (Clean Studio Slate Light Theme)
+/* ── Chart renderer ───────────────────────────────────────── */
 function renderChart(canvasId, data) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
-
   const cfg = data.chart;
   const colNames = data.columns.map(c => c.toLowerCase());
   const xIdx = cfg.x_axis ? colNames.indexOf(cfg.x_axis.toLowerCase()) : 0;
   const yIdx = cfg.y_axis ? colNames.indexOf(cfg.y_axis.toLowerCase()) : (data.columns.length > 1 ? 1 : 0);
-
   const labels = data.rows.map(r => String(r[xIdx]));
   const values = data.rows.map(r => Number(r[yIdx]) || 0);
 
   const colors = [
-    '#2563eb', '#0ea5e9', '#10b981', '#f59e0b', '#8b5cf6',
-    '#ec4899', '#3b82f6', '#14b8a6', '#f97316', '#a855f7'
+    '#0E9999','#B1E5E6','#7DD3D4','#0B7A7A','#CCFBFA',
+    '#085F5F','#34d399','#a7f3d0','#6ee7b7','#10b981'
   ];
 
-  const ctx = canvas.getContext('2d');
-  new Chart(ctx, {
+  new Chart(canvas.getContext('2d'), {
     type: cfg.type === 'doughnut' ? 'doughnut' : 'bar',
     data: {
-      labels: labels,
+      labels,
       datasets: [{
         label: data.columns[yIdx] || 'Value',
         data: values,
-        backgroundColor: cfg.type === 'doughnut' ? colors.slice(0, labels.length) : 'rgba(37, 99, 235, 0.85)',
-        borderColor: cfg.type === 'doughnut' ? '#ffffff' : '#2563eb',
+        backgroundColor: cfg.type === 'doughnut'
+          ? colors.slice(0, labels.length)
+          : 'rgba(14,153,153,0.80)',
+        borderColor: cfg.type === 'doughnut' ? '#ffffff' : '#0B7A7A',
         borderWidth: cfg.type === 'doughnut' ? 2 : 1.5,
         borderRadius: cfg.type === 'doughnut' ? 0 : 6,
       }]
@@ -582,111 +523,96 @@ function renderChart(canvasId, data) {
       plugins: {
         legend: {
           display: cfg.type === 'doughnut',
-          labels: { color: '#475569', font: { family: 'Inter', size: 12 } }
+          labels: { color: '#1f4646', font: { family: 'Inter', size: 12 } }
         },
         tooltip: {
           backgroundColor: '#ffffff',
-          titleColor: '#0f172a',
-          bodyColor: '#475569',
-          borderColor: '#e2e8f0',
+          titleColor: '#0a2929',
+          bodyColor: '#4d8585',
+          borderColor: '#cceced',
           borderWidth: 1,
           padding: 10,
-          boxShadow: '0 4px 12px rgba(15, 23, 42, 0.08)'
         }
       },
       scales: cfg.type === 'doughnut' ? {} : {
-        x: {
-          ticks: { color: '#64748b', font: { family: 'Inter', size: 11 } },
-          grid: { display: false }
-        },
-        y: {
-          ticks: { color: '#64748b', font: { family: 'Inter', size: 11 } },
-          grid: { color: 'rgba(226, 232, 240, 0.8)' }
-        }
+        x: { ticks: { color: '#4d8585', font: { family: 'Inter', size: 11 } }, grid: { display: false } },
+        y: { ticks: { color: '#4d8585', font: { family: 'Inter', size: 11 } }, grid: { color: 'rgba(177,229,230,0.5)' } }
       }
     }
   });
 }
 
-// Execute Raw SQL in Console Tab
+/* ── SQL Console ──────────────────────────────────────────── */
 async function executeCustomSql() {
   const sql = document.getElementById('sql-editor').value.trim();
   const resultsContainer = document.getElementById('sql-console-results');
   if (!sql) return;
 
-  resultsContainer.innerHTML = '<div class="loading-state">Executing query on MySQL...</div>';
+  resultsContainer.innerHTML = '<div class="loading-state">Executing…</div>';
 
   try {
-    const res = await authFetch('http://localhost:8000/api/query', {
+    const res  = await authFetch(API + '/api/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sql })
+      body: JSON.stringify({ sql }),
     });
-
     const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.detail || 'Execution failed');
-    }
+    if (!res.ok) throw new Error(data.detail || 'Execution failed');
 
     resultsContainer.innerHTML = `
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-        <span style="color:#2563eb; font-size:0.88rem; font-weight:600;">Returned ${data.row_count} rows in ${data.timing_ms || 0}ms</span>
-        <span class="badge" style="background:#ecfdf5; color:#059669; border-color:#a7f3d0;">Safe Query Passed</span>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <span style="color:var(--teal-base);font-size:0.87rem;font-weight:600;">
+          ${data.row_count} rows · ${data.timing_ms || 0}ms
+        </span>
+        <span style="font-size:0.72rem;padding:2px 9px;border-radius:999px;
+                     background:var(--teal-lightest);color:var(--teal-dark);
+                     border:1px solid var(--border-subtle);font-weight:600;">Safe Query</span>
       </div>
       <div class="table-wrapper">
         <table class="data-table">
-          <thead>
-            <tr>${data.columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr>
-          </thead>
+          <thead><tr>${data.columns.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
           <tbody>
-            ${data.rows.map(row => `
-              <tr>${row.map(val => `<td>${val !== null && val !== undefined ? escapeHtml(String(val)) : '<span style="color:#94a3b8">NULL</span>'}</td>`).join('')}</tr>
-            `).join('')}
+            ${data.rows.map(row =>
+              '<tr>' + row.map(val =>
+                `<td>${val !== null && val !== undefined ? escapeHtml(String(val)) : '<span style="color:#7aacac">NULL</span>'}</td>`
+              ).join('') + '</tr>'
+            ).join('')}
           </tbody>
         </table>
-      </div>
-    `;
+      </div>`;
   } catch (err) {
     resultsContainer.innerHTML = `
-      <div style="color:#b91c1c; padding:16px; border:1px solid #fecdd3; border-radius:8px; background:#fff1f2;">
-        <strong>Execution Error:</strong> ${escapeHtml(err.message)}
-      </div>
-    `;
+      <div style="color:#b91c1c;padding:14px;border:1px solid #fecdd3;
+                  border-radius:8px;background:#fff1f2;font-size:0.88rem;">
+        <strong>Error:</strong> ${escapeHtml(err.message)}
+      </div>`;
   }
 }
 
-// Copy SQL to Clipboard
+/* ── Copy SQL ─────────────────────────────────────────────── */
 function copySql(cardId) {
-  const codeElem = document.getElementById('code-' + cardId);
-  if (!codeElem) return;
-
-  navigator.clipboard.writeText(codeElem.textContent).then(() => {
+  const el = document.getElementById('code-' + cardId);
+  if (!el) return;
+  navigator.clipboard.writeText(el.textContent).then(() => {
     const btn = document.querySelector(`#${cardId} .copy-btn`);
     if (btn) {
       const orig = btn.textContent;
-      btn.textContent = '✓ Copied!';
-      setTimeout(() => btn.textContent = orig, 1800);
+      btn.textContent = '✓ Copied';
+      setTimeout(() => btn.textContent = orig, 1600);
     }
   });
 }
 
-// Helper: Scroll Chat to Bottom
+/* ── Scroll ───────────────────────────────────────────────── */
 function scrollToBottom() {
-  const scroll = document.getElementById('messages-scroll');
-  if (scroll) {
-    setTimeout(() => {
-      scroll.scrollTop = scroll.scrollHeight;
-    }, 50);
-  }
+  const el = document.getElementById('messages-scroll');
+  if (el) setTimeout(() => el.scrollTop = el.scrollHeight, 40);
 }
 
-// Helper: HTML Escaping
+/* ── HTML escape ──────────────────────────────────────────── */
 function escapeHtml(str) {
   if (typeof str !== 'string') return str;
   return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }

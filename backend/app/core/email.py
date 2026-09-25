@@ -127,3 +127,42 @@ def send_password_reset_email(to_email: str, name: str, token: str) -> None:
     except Exception as exc:
         logger.warning(f"[EMAIL] Failed to send reset email to {to_email}: {exc}")
 
+
+
+def send_otp_email(to_email: str, name: str, code: str) -> bool:
+    """
+    Send a 6-digit OTP for email verification.
+    Returns True if email was sent, False if SMTP not configured or send failed.
+    In dev/fallback mode the code is printed to the server log.
+    """
+    if not settings.smtp_configured:
+        logger.info(
+            f"[EMAIL DEV] OTP for {to_email}  →  {code}  "
+            f"(SMTP not configured — check server logs)"
+        )
+        return False
+
+    html = f"""
+    <html><body style="font-family:sans-serif;max-width:600px;margin:auto;padding:40px;">
+      <h2 style="color:#6366f1;">Hi {name}, here is your verification code</h2>
+      <p style="font-size:15px;color:#374151;">
+        Use the code below to verify your email address.
+        It expires in <strong>10 minutes</strong>.
+      </p>
+      <div style="margin:32px auto;width:fit-content;background:#f3f4f6;
+                  border-radius:12px;padding:24px 48px;text-align:center;">
+        <span style="font-size:40px;font-weight:800;letter-spacing:12px;
+                     color:#6366f1;">{code}</span>
+      </div>
+      <p style="color:#6b7280;font-size:13px;">
+        If you did not create an account, you can safely ignore this email.
+      </p>
+    </body></html>
+    """
+    try:
+        _send(to_email, "Your SQLAnalyst verification code", html)
+        logger.info(f"[EMAIL] OTP sent to {to_email}")
+        return True
+    except Exception as exc:
+        logger.warning(f"[EMAIL] Failed to send OTP to {to_email}: {exc}")
+        return False

@@ -13,14 +13,16 @@ from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy import text, select
 
 from app.config import settings
-from app.db.connection import get_target_connection, engine as target_engine
+from app.db.connection import get_target_connection, get_engine
 from app.db.session import engine as app_engine, AsyncSessionLocal
 from app.db.base import Base
+from app.models import user, otp  # noqa: F401 — ensures tables are registered
 from app.utils.logger import logger
 from app.api.routes import ask, auth, schema
 from app.api.routes import admin as admin_routes
 from app.api.routes import data_sources
 from app.api.routes import ask_stream
+from app.api.routes import chat_history
 from app.services.query_cache import query_cache
 
 
@@ -117,6 +119,7 @@ app.include_router(auth.router)
 app.include_router(schema.router)
 app.include_router(admin_routes.router)
 app.include_router(data_sources.router)
+app.include_router(chat_history.router)
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +165,7 @@ def serve_admin():
 @app.get("/health", tags=["health"])
 def health_check():
     try:
-        with target_engine.connect() as conn:
+        with get_engine().connect() as conn:
             target_version = conn.execute(text("SELECT VERSION()")).scalar()
             target_db_ok = True
     except Exception as exc:

@@ -33,16 +33,17 @@ def _introspect_db() -> Dict[str, Any]:
     Connect to the target DB, walk every table, and return a schema dict.
     Works with MySQL, PostgreSQL, SQLite, SQL Server, Oracle.
     """
-    from app.db.connection import engine
+    from app.db.connection import get_engine   # get the REAL engine, not the proxy
 
+    real_engine = get_engine()
     schema: Dict[str, Any] = {"tables": {}}
 
     try:
-        inspector = inspect(engine)
+        inspector = inspect(real_engine)
         table_names = inspector.get_table_names()
         logger.info(f"[SCHEMA] Found {len(table_names)} tables in target DB.")
 
-        with engine.connect() as conn:
+        with real_engine.connect() as conn:
             for table in table_names:
                 # --- columns ---
                 cols = []
@@ -114,22 +115,20 @@ def refresh_schema() -> Dict[str, Any]:
     """
     Re-introspect the live target DB, overwrite schema_cache.json,
     and clear the in-process lru_cache.
-
-    Also resets the DB engine so any TARGET_DB_URL change in .env
-    is picked up immediately without a server restart.
-
-    Call this:
-      - at app startup  (automatic)
-      - after changing TARGET_DB_URL
-      - via POST /api/schema/refresh
     """
-    # Reset the engine first so we connect to the current URL
     from app.db.connection import reset_engine
     reset_engine()
 
     schema = _introspect_db()
-    _save_cache(schema)
-    _cached_schema.cache_clear()          # bust the in-memory cache
+
+    # Only overwrite the cache if we actually got tables back.
+    # This prevents a transient connection failure from wiping good data.
+    if schema.get("tables"):
+        _save_cache(schema)
+    else:
+        logger.warning("[SCHEMA] Introspection returned 0 tables — cache NOT overwritten.")
+
+    _cached_schema.cache_clear()
     return schema
 
 

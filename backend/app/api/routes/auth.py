@@ -1,17 +1,19 @@
 """
 Authentication routes — register, login, refresh, logout,
-email verification, forgot/reset password, and /me.
+email verification, forgot/reset password, OTP verify, and /me.
 """
 
+import random
 import uuid
 import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, and_, func
+from sqlalchemy import select, or_, and_, func, delete
 
 from app.db.session import get_db
 from app.models.user import User
+from app.models.otp import OTPCode
 from app.schemas.auth import (
     RegisterRequest,
     LoginRequest,
@@ -19,6 +21,8 @@ from app.schemas.auth import (
     UserInToken,
     ForgotPasswordRequest,
     ResetPasswordRequest,
+    SendOTPRequest,
+    VerifyOTPRequest,
 )
 from app.core.security import (
     hash_password,
@@ -29,7 +33,11 @@ from app.core.security import (
     get_current_user,
 )
 from app.core.email_tokens import create_email_token, verify_email_token
-from app.core.email import send_verification_email, send_password_reset_email
+from app.core.email import (
+    send_verification_email,
+    send_password_reset_email,
+    send_otp_email,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -47,13 +55,12 @@ def _user_token_payload(user: User) -> UserInToken:
 
 
 # ---------------------------------------------------------------------------
-# Register
+# Register  — creates account + sends OTP immediately
 # ---------------------------------------------------------------------------
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(
     body: RegisterRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     # Ensure email is unique
@@ -65,23 +72,141 @@ async def register(
         email=body.email,
         name=body.name,
         password_hash=hash_password(body.password),
+        email_verified=False,
     )
     db.add(user)
     await db.commit()
     await db.refresh(user)
 
-    # Send verification email in background (optional — user can log in immediately)
-    verify_token = create_email_token("email_verify", str(user.id))
-    background_tasks.add_task(
-        send_verification_email, user.email, user.name, verify_token
+    # Generate OTP
+    code = f"{random.randint(0, 999999):06d}"
+    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+    await db.execute(delete(OTPCode).where(OTPCode.email == body.email))
+    db.add(OTPCode(email=body.email, code=code, expires_at=expires))
+    await db.commit()
+
+    # Try to send email synchronously so we know immediately if it worked
+    import asyncio
+    email_sent = await asyncio.to_thread(
+        send_otp_email, body.email, body.name, code
     )
 
-    return {
+    response = {
         "id": str(user.id),
         "email": user.email,
         "name": user.name,
-        "message": "Account created. Check your email to verify your address.",
+        "email_sent": email_sent,
+        "message": (
+            "OTP sent to your email."
+            if email_sent
+            else "Email delivery failed. Use the code shown on screen."
+        ),
     }
+
+    # If email failed, return the code directly so frontend can show it
+    if not email_sent:
+        response["dev_otp"] = code
+
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Send OTP  — resend / send fresh code to an email
+# ---------------------------------------------------------------------------
+
+@router.post("/send-otp")
+async def send_otp(
+    body: SendOTPRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(User).where(User.email == body.email))
+    user = result.scalar_one_or_none()
+    if not user:
+        return {"detail": "If that email is registered, an OTP has been sent.", "email_sent": False}
+
+    code = f"{random.randint(0, 999999):06d}"
+    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+    await db.execute(delete(OTPCode).where(OTPCode.email == body.email))
+    db.add(OTPCode(email=body.email, code=code, expires_at=expires))
+    await db.commit()
+
+    import asyncio
+    email_sent = await asyncio.to_thread(send_otp_email, body.email, user.name, code)
+
+    response = {
+        "detail": "OTP sent. Check your inbox." if email_sent else "Email delivery failed. Use the code shown on screen.",
+        "email_sent": email_sent,
+    }
+    if not email_sent:
+        response["dev_otp"] = code
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Verify OTP  — marks email verified, returns tokens so user is logged in
+# ---------------------------------------------------------------------------
+
+@router.post("/verify-otp", response_model=TokenResponse)
+async def verify_otp(
+    body: VerifyOTPRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    # Look up the latest unused, unexpired OTP for this email
+    result = await db.execute(
+        select(OTPCode)
+        .where(OTPCode.email == body.email, OTPCode.used == False)
+        .order_by(OTPCode.created_at.desc())
+        .limit(1)
+    )
+    otp = result.scalar_one_or_none()
+
+    if not otp:
+        raise HTTPException(status_code=400, detail="No OTP found. Request a new one.")
+    if otp.is_expired():
+        raise HTTPException(status_code=400, detail="OTP has expired. Request a new one.")
+    if otp.code != body.code.strip():
+        raise HTTPException(status_code=400, detail="Incorrect OTP code.")
+
+    # Mark OTP as used
+    otp.used = True
+    db.add(otp)
+
+    # Mark user as verified
+    user_result = await db.execute(select(User).where(User.email == body.email))
+    user = user_result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    user.email_verified = True
+    db.add(user)
+    await db.commit()
+
+    # Issue tokens so user is logged in immediately after verification
+    access_token = create_access_token({"sub": str(user.id)})
+    refresh_token = create_refresh_token({"sub": str(user.id)})
+
+    response.set_cookie(
+        key=REFRESH_COOKIE,
+        value=refresh_token,
+        httponly=True,
+        max_age=60 * 60 * 24 * 30,
+        secure=False,
+        samesite="lax",
+    )
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=UserInToken(
+            id=str(user.id),
+            name=user.name,
+            email=user.email,
+            role=user.role,
+            email_verified=True,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +233,11 @@ async def login(
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is deactivated")
+    if not user.email_verified:
+        raise HTTPException(
+            status_code=403,
+            detail="Email not verified. Please enter the OTP sent to your email.",
+        )
 
     access_token = create_access_token({"sub": str(user.id)})
     refresh_token = create_refresh_token({"sub": str(user.id)})

@@ -6,7 +6,7 @@ import time
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
-from app.db.connection import engine as target_engine
+from app.db.connection import get_engine
 from app.config import settings
 from app.utils.logger import logger
 
@@ -30,7 +30,7 @@ def execute_safe_query(sql: str, max_rows: Optional[int] = None) -> QueryResult:
     cap = max_rows or settings.db_max_rows
     start = time.monotonic()
 
-    conn = target_engine.raw_connection()
+    conn = get_engine().raw_connection()
     try:
         cursor = conn.cursor()
 
