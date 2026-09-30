@@ -119,16 +119,22 @@ def _clean_sql(raw: str) -> str:
     return clean.rstrip(";")
 
 
-def _groq_sql(question: str) -> Optional[str]:
+def _groq_sql(
+    question: str,
+    schema_context: Optional[Any] = None,
+    dialect: str = "mysql",
+) -> Optional[str]:
     key = settings.groq_api_key.strip()
     if not key or key == "gsk_your_key_here" or not key.startswith("gsk_"):
         return None
     try:
         from groq import Groq
         client = Groq(api_key=key, base_url=settings.llm_base_url)
-        schema_json = get_schema()
+        if schema_context is None:
+            schema_context = get_schema()
+        context_str = json.dumps(schema_context, indent=2) if isinstance(schema_context, dict) else str(schema_context)
         system_prompt = SQL_GENERATION_PROMPT.format(
-            context=schema_json, question=question
+            context=context_str, question=question
         )
         resp = client.chat.completions.create(
             model=settings.llm_model,
@@ -136,83 +142,17 @@ def _groq_sql(question: str) -> Optional[str]:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question},
             ],
-            temperature=0.0,
-            max_tokens=500,
+            temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens,
         )
-        return _clean_sql(resp.choices[0].message.content or "")
+        cleaned = _clean_sql(resp.choices[0].message.content or "")
+        lower_cleaned = cleaned.lower()
+        if not cleaned or "cannot answer" in lower_cleaned or not (lower_cleaned.startswith("select") or lower_cleaned.startswith("with")):
+            return None
+        return cleaned
     except Exception as exc:
         logger.warning(f"[STREAM] Groq SQL gen failed: {exc}")
         return None
-
-
-def _fallback_sql(q: str) -> str:
-    """Minimal analytical fallback — identical logic to ask.py."""
-    lower = q.lower().strip()
-    if lower.startswith("select ") or lower.startswith("with "):
-        return q.rstrip(";")
-    if ("top" in lower or "best" in lower) and (
-        "customer" in lower or "spend" in lower
-    ):
-        limit = 5
-        m = re.search(r"top\s+(\d+)", lower)
-        if m:
-            limit = int(m.group(1))
-        return (
-            f"SELECT c.customer_id, c.name, c.country, SUM(o.total_amount) AS total_spent "
-            f"FROM customers c JOIN orders o ON c.customer_id = o.customer_id "
-            f"WHERE o.status = 'delivered' "
-            f"GROUP BY c.customer_id, c.name, c.country "
-            f"ORDER BY total_spent DESC LIMIT {limit}"
-        )
-    if "category" in lower and ("revenue" in lower or "sales" in lower):
-        return (
-            "SELECT p.category, SUM(oi.subtotal) AS category_revenue "
-            "FROM products p JOIN order_items oi ON p.product_id = oi.product_id "
-            "JOIN orders o ON oi.order_id = o.order_id WHERE o.status = 'delivered' "
-            "GROUP BY p.category ORDER BY category_revenue DESC"
-        )
-    if ("product" in lower or "item" in lower) and (
-        "sell" in lower or "sold" in lower or "popular" in lower
-    ):
-        limit = 5
-        m = re.search(r"top\s+(\d+)", lower)
-        if m:
-            limit = int(m.group(1))
-        return (
-            f"SELECT p.name, p.category, SUM(oi.quantity) AS units_sold "
-            f"FROM products p JOIN order_items oi ON p.product_id = oi.product_id "
-            f"JOIN orders o ON oi.order_id = o.order_id WHERE o.status = 'delivered' "
-            f"GROUP BY p.product_id, p.name, p.category "
-            f"ORDER BY units_sold DESC LIMIT {limit}"
-        )
-    if "status" in lower or "pending" in lower:
-        return (
-            "SELECT status, COUNT(*) AS order_count, SUM(total_amount) AS total_amount "
-            "FROM orders GROUP BY status ORDER BY order_count DESC"
-        )
-    if "country" in lower:
-        return (
-            "SELECT country, COUNT(*) AS customer_count FROM customers "
-            "GROUP BY country ORDER BY customer_count DESC"
-        )
-    if "total revenue" in lower or "how much revenue" in lower:
-        return (
-            "SELECT COUNT(*) AS delivered_orders, SUM(total_amount) AS total_revenue "
-            "FROM orders WHERE status = 'delivered'"
-        )
-    if "recent order" in lower or "latest order" in lower:
-        return (
-            "SELECT o.order_id, c.name AS customer_name, o.status, "
-            "o.total_amount, o.created_at FROM orders o "
-            "JOIN customers c ON o.customer_id = c.customer_id "
-            "ORDER BY o.created_at DESC LIMIT 10"
-        )
-    if "inventory" in lower or "stock" in lower:
-        return (
-            "SELECT name, category, price, stock_quantity FROM products "
-            "ORDER BY stock_quantity ASC LIMIT 10"
-        )
-    return "SELECT customer_id, name, email, country, city FROM customers LIMIT 10"
 
 
 def _infer_chart(columns: List[str], rows: List[List[Any]]) -> Optional[Dict]:
@@ -296,13 +236,27 @@ async def _stream_response(
             return
 
     # ------------------------------------------------------------------
-    # 2. SQL generation (blocking Groq HTTP call → thread)
+    # 2. SQL generation (Direct SQL or Groq LLM via active schema)
     # ------------------------------------------------------------------
-    generated_sql: Optional[str] = await asyncio.to_thread(_groq_sql, question)
-    engine_used = "groq-llm"
+    active_schema = None
+    if data_source:
+        active_schema = await ConnectionManager.get_schema(data_source)
+    else:
+        active_schema = get_schema()
+
+    lower_q = question.lower()
+    if lower_q.startswith("select ") or lower_q.startswith("with "):
+        generated_sql = question.rstrip(";")
+        engine_used = "direct-sql"
+    else:
+        generated_sql = await asyncio.to_thread(_groq_sql, question, active_schema, dialect)
+        engine_used = "groq-llm"
+
     if not generated_sql:
-        generated_sql = _fallback_sql(question)
-        engine_used = "analytics-engine"
+        yield _sse("error", {
+            "detail": "Failed to generate SQL query for your question with the current database schema. Please check that your database has relevant tables or provide a direct SQL query."
+        })
+        return
 
     # ------------------------------------------------------------------
     # 3. Safety validation (pure CPU → thread)
@@ -412,8 +366,8 @@ async def _stream_response(
                     stream = client.chat.completions.create(
                         model=settings.llm_model,
                         messages=[{"role": "user", "content": prompt_text}],
-                        temperature=0.3,
-                        max_tokens=300,
+                        temperature=settings.llm_explanation_temperature,
+                        max_tokens=settings.llm_explanation_max_tokens,
                         stream=True,
                     )
                     for chunk in stream:

@@ -10,7 +10,10 @@ uI
 cd D:\worksbot\project3.0\sqlanalyst\frontend
 python -m http.server 5173 --bind 127.0.0.1
 
+next js 
 
+
+PS D:\worksbot\project3.0\sqlanalyst\nextjs-frontend> npm run dev
 
 
 cd D:\worksbot\project3.0\sqlanalyst

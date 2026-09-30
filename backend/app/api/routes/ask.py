@@ -4,6 +4,7 @@ Translates business questions into safe MySQL queries, executes them,
 and returns data tables, visualizations, and plain-English explanations.
 """
 
+import json
 import re
 import uuid
 from typing import Any, Dict, List, Optional
@@ -48,7 +49,7 @@ class AskResponse(BaseModel):
     timing_ms: int
     explanation: str
     chart: Optional[ChartConfig] = None
-    engine_used: str  # "groq-llm" or "analytics-engine"
+    engine_used: str  # "groq-llm" or "direct-sql"
 
 
 def _clean_sql_output(raw: str) -> str:
@@ -62,135 +63,59 @@ def _clean_sql_output(raw: str) -> str:
     return clean
 
 
-def _generate_sql_groq(question: str) -> Optional[str]:
-    """Call Groq API using llama-3.3-70b-versatile if key is configured."""
+def _generate_sql_groq(
+    question: str,
+    schema_context: Optional[Dict[str, Any]] = None,
+    dialect: str = "mysql",
+) -> str:
+    """Call Groq API using configured model to generate dialect-specific SQL."""
     key = settings.groq_api_key.strip()
     if not key or key == "gsk_your_key_here" or not key.startswith("gsk_"):
-        return None
+        raise HTTPException(
+            status_code=503,
+            detail="Groq LLM API key is not configured. Please set GROQ_API_KEY in backend/.env to enable AI query generation.",
+        )
 
     try:
         from groq import Groq
         client = Groq(api_key=key, base_url=settings.llm_base_url)
 
-        schema_json = get_schema()
-        # Use the LangChain prompt template for SQL generation
-        system_prompt = SQL_GENERATION_PROMPT.format(context=schema_json, question=question)
+        if schema_context is None:
+            schema_context = get_schema()
+
+        context_str = json.dumps(schema_context, indent=2) if isinstance(schema_context, dict) else str(schema_context)
+        system_prompt = SQL_GENERATION_PROMPT.format(context=context_str, question=question)
+
         response = client.chat.completions.create(
             model=settings.llm_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question},
             ],
-            temperature=0.0,
-            max_tokens=500,
+            temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens,
         )
         raw_sql = response.choices[0].message.content or ""
-        return _clean_sql_output(raw_sql)
+        cleaned = _clean_sql_output(raw_sql)
+
+        # Check if the LLM output is not a query
+        lower_cleaned = cleaned.lower()
+        if not cleaned or "cannot answer" in lower_cleaned or not (lower_cleaned.startswith("select") or lower_cleaned.startswith("with")):
+            logger.warning(f"[ASK] Groq did not return a valid SELECT/WITH query. Output was: {raw_sql}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"The AI could not generate a SQL query for this question with the current database schema: {raw_sql.strip() or 'No SQL generated'}"
+            )
+
+        return cleaned
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning(f"[ASK] Groq SQL generation failed, using analytical fallback: {e}")
-        return None
-
-
-def _fallback_sql_generator(q: str) -> str:
-    """Intelligent analytical pattern matching for natural language questions."""
-    lower = q.lower().strip()
-
-    # Direct raw SQL query support
-    if lower.startswith("select ") or lower.startswith("with "):
-        return q.rstrip(";")
-
-    # Top customers by spending
-    if ("top" in lower or "best" in lower) and ("customer" in lower or "spender" in lower or "spending" in lower):
-        limit = 5
-        match = re.search(r"top\s+(\d+)", lower)
-        if match:
-            limit = int(match.group(1))
-        return (
-            f"SELECT c.customer_id, c.name, c.country, SUM(o.total_amount) AS total_spent "
-            f"FROM customers c "
-            f"JOIN orders o ON c.customer_id = o.customer_id "
-            f"WHERE o.status = 'delivered' "
-            f"GROUP BY c.customer_id, c.name, c.country "
-            f"ORDER BY total_spent DESC "
-            f"LIMIT {limit}"
+        logger.error(f"[ASK] Groq SQL generation failed: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI query generation failed: {str(e)}"
         )
-
-    # Category revenue
-    if "category" in lower and ("revenue" in lower or "sales" in lower or "most" in lower or "highest" in lower):
-        return (
-            "SELECT p.category, SUM(oi.subtotal) AS category_revenue, SUM(oi.quantity) AS total_units_sold "
-            "FROM products p "
-            "JOIN order_items oi ON p.product_id = oi.product_id "
-            "JOIN orders o ON oi.order_id = o.order_id "
-            "WHERE o.status = 'delivered' "
-            "GROUP BY p.category "
-            "ORDER BY category_revenue DESC"
-        )
-
-    # Top selling products
-    if ("product" in lower or "item" in lower) and ("sell" in lower or "sold" in lower or "popular" in lower or "top" in lower):
-        limit = 5
-        match = re.search(r"top\s+(\d+)", lower)
-        if match:
-            limit = int(match.group(1))
-        return (
-            f"SELECT p.product_id, p.name, p.category, SUM(oi.quantity) AS units_sold, SUM(oi.subtotal) AS total_sales "
-            f"FROM products p "
-            f"JOIN order_items oi ON p.product_id = oi.product_id "
-            f"JOIN orders o ON oi.order_id = o.order_id "
-            f"WHERE o.status = 'delivered' "
-            f"GROUP BY p.product_id, p.name, p.category "
-            f"ORDER BY units_sold DESC "
-            f"LIMIT {limit}"
-        )
-
-    # Order status counts
-    if "status" in lower or "pending" in lower or "order count" in lower:
-        return (
-            "SELECT status, COUNT(*) AS order_count, SUM(total_amount) AS total_amount "
-            "FROM orders "
-            "GROUP BY status "
-            "ORDER BY order_count DESC"
-        )
-
-    # Country breakdown
-    if "country" in lower:
-        return (
-            "SELECT country, COUNT(*) AS customer_count "
-            "FROM customers "
-            "GROUP BY country "
-            "ORDER BY customer_count DESC"
-        )
-
-    # Total revenue
-    if "total revenue" in lower or "how much revenue" in lower:
-        return (
-            "SELECT COUNT(*) AS delivered_orders, SUM(total_amount) AS total_revenue, AVG(total_amount) AS average_order_value "
-            "FROM orders "
-            "WHERE status = 'delivered'"
-        )
-
-    # Recent orders
-    if "recent order" in lower or "latest order" in lower:
-        return (
-            "SELECT o.order_id, c.name AS customer_name, o.status, o.total_amount, o.created_at "
-            "FROM orders o "
-            "JOIN customers c ON o.customer_id = c.customer_id "
-            "ORDER BY o.created_at DESC "
-            "LIMIT 10"
-        )
-
-    # Inventory / Stock
-    if "inventory" in lower or "stock" in lower:
-        return (
-            "SELECT name, category, price, stock_quantity "
-            "FROM products "
-            "ORDER BY stock_quantity ASC "
-            "LIMIT 10"
-        )
-
-    # Default fallback
-    return "SELECT customer_id, name, email, country, city FROM customers LIMIT 10"
 
 
 def _infer_chart(columns: List[str], rows: List[List[Any]]) -> Optional[ChartConfig]:
@@ -214,13 +139,11 @@ def _infer_chart(columns: List[str], rows: List[List[Any]]) -> Optional[ChartCon
         y_axis=y_axis,
     )
 
-    return None
 
-
-def _generate_explanation(question: str, columns: List[str], rows: List[List[Any]]) -> str:
+def _generate_explanation(question: str, columns: List[str], rows: List[List[Any]], db_label: str = "database") -> str:
     """Generate a brief business summary of the results."""
     if not rows:
-        return "No matching records were found in the analytics database for this question."
+        return f"No matching records were found in {db_label} for this question."
 
     count = len(rows)
     if count == 1 and len(columns) >= 1:
@@ -234,7 +157,7 @@ def _generate_explanation(question: str, columns: List[str], rows: List[List[Any
             f"with {columns[-1].replace('_', ' ')} of {first_item[-1]}."
         )
 
-    return f"Retrieved {count} matching records from the MySQL database."
+    return f"Retrieved {count} matching records from {db_label}."
 
 
 @router.post("/ask", response_model=AskResponse)
@@ -245,9 +168,9 @@ async def ask_question(
 ):
     """
     Main Natural Language Text-to-SQL endpoint.
-    1. Generates MySQL query from question.
+    1. Generates dialect-correct SQL using active schema and AI (or accepts direct SELECT/WITH).
     2. Validates SQL through 11 safety rules.
-    3. Executes query on MySQL target DB or dynamic data source.
+    3. Executes query on target DB or dynamic data source.
     4. Recommends interactive chart and business summary.
     """
     question = body.question.strip()
@@ -257,6 +180,7 @@ async def ask_question(
     # Check if using dynamic data source
     data_source = None
     dialect = "mysql"  # default
+    active_schema = None
 
     if body.data_source_id:
         try:
@@ -281,19 +205,23 @@ async def ask_question(
                 "oracle": "oracle",
             }
             dialect = dialect_map.get(data_source.db_type, "mysql")
+            active_schema = await ConnectionManager.get_schema(data_source)
 
             logger.info(f"[ASK] Using dynamic data source: {data_source.name} ({data_source.db_type})")
 
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid data source ID format")
+    else:
+        active_schema = get_schema()
 
-    # 1. SQL Generation (Groq LLM or analytical engine)
-    generated_sql = _generate_sql_groq(question)
-    engine_used = "groq-llm"
-
-    if not generated_sql:
-        generated_sql = _fallback_sql_generator(question)
-        engine_used = "analytics-engine"
+    # 1. SQL Generation (Direct raw SQL or Groq LLM)
+    lower_q = question.lower()
+    if lower_q.startswith("select ") or lower_q.startswith("with "):
+        generated_sql = question.rstrip(";")
+        engine_used = "direct-sql"
+    else:
+        generated_sql = _generate_sql_groq(question, schema_context=active_schema, dialect=dialect)
+        engine_used = "groq-llm"
 
     # 2. Safety Validation (11 AST checks)
     try:
@@ -362,8 +290,9 @@ async def ask_question(
         raise HTTPException(status_code=400, detail=f"Database Execution Error: {exec_err}")
 
     # 4. Chart & Explanation Inference
+    db_label = data_source.name if data_source else "database"
     chart = _infer_chart(res.columns, res.rows)
-    explanation = _generate_explanation(question, res.columns, res.rows)
+    explanation = _generate_explanation(question, res.columns, res.rows, db_label=db_label)
 
     return AskResponse(
         question=question,

@@ -16,6 +16,13 @@ def _int(name: str, default: int) -> int:
     except (ValueError, TypeError):
         return default
 
+def _float(name: str, default: float) -> float:
+    """Return a float from the environment or the supplied default."""
+    try:
+        return float(os.getenv(name, str(default)))
+    except (ValueError, TypeError):
+        return default
+
 class Settings:
     # Application basics
     app_env: str = os.getenv("APP_ENV", "development")
@@ -42,6 +49,10 @@ class Settings:
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
     llm_model: str = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
     llm_base_url: str = os.getenv("LLM_BASE_URL", "https://api.groq.com")
+    llm_temperature: float = _float("LLM_TEMPERATURE", 0.0)
+    llm_max_tokens: int = _int("LLM_MAX_TOKENS", 500)
+    llm_explanation_temperature: float = _float("LLM_EXPLANATION_TEMPERATURE", 0.3)
+    llm_explanation_max_tokens: int = _int("LLM_EXPLANATION_MAX_TOKENS", 300)
 
     # Security
     db_max_rows: int = _int("DB_MAX_ROWS", 10000)
@@ -62,6 +73,9 @@ class Settings:
     default_admin_email: str = os.getenv("DEFAULT_ADMIN_EMAIL", "admin@sqlanalyst.com")
     default_admin_password: str = os.getenv("DEFAULT_ADMIN_PASSWORD", "Admin1234")
     default_admin_name: str = os.getenv("DEFAULT_ADMIN_NAME", "Admin")
+
+    # Google OAuth
+    google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "your-google-client-id.apps.googleusercontent.com")
 
 @lru_cache()
 def get_settings() -> Settings:

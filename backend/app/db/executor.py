@@ -47,7 +47,7 @@ def execute_safe_query(sql: str, max_rows: Optional[int] = None) -> QueryResult:
             except Exception:
                 pass  # Not critical
 
-        cursor.execute(sql)
+        cursor.execute(sql)   #EXECUTE QUERY IMP
 
         columns: List[str] = []
         rows: List[List[Any]] = []

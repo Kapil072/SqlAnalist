@@ -25,4 +25,9 @@ class OTPCode(Base):
     )
 
     def is_expired(self) -> bool:
-        return datetime.now(timezone.utc) > self.expires_at
+        now = datetime.now(timezone.utc)
+        expires = self.expires_at
+        # SQLite returns naive datetimes — normalize both to UTC for comparison
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        return now > expires

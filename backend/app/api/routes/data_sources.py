@@ -202,7 +202,8 @@ async def update_data_source(
     await db.commit()
     await db.refresh(data_source)
 
-    # Clear query cache for this data source since connection details changed
+    # Clear connection manager engine/schema cache and query cache
+    ConnectionManager.invalidate_cache(data_source.id)
     await query_cache.invalidate_data_source(str(data_source.id))
 
     logger.info(f"[DATA_SOURCE] Updated data source: {data_source.name} by admin {current_admin.email}")
@@ -245,10 +246,7 @@ async def delete_data_source(
     await db.commit()
 
     # Clear from connection manager cache
-    from app.services.connection_manager import get_engine_cache
-    engine_cache = get_engine_cache()
-    if data_source_uuid in engine_cache:
-        del engine_cache[data_source_uuid]
+    ConnectionManager.invalidate_cache(data_source_uuid)
 
     # Clear query cache for this data source
     await query_cache.invalidate_data_source(str(data_source_uuid))

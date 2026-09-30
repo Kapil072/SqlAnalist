@@ -23,6 +23,8 @@ from app.api.routes import admin as admin_routes
 from app.api.routes import data_sources
 from app.api.routes import ask_stream
 from app.api.routes import chat_history
+from app.api.routes import file_analysis
+from app.api.routes import google_auth
 from app.services.query_cache import query_cache
 
 
@@ -116,10 +118,12 @@ app.add_middleware(
 app.include_router(ask.router)
 app.include_router(ask_stream.router)
 app.include_router(auth.router)
+app.include_router(google_auth.router)
 app.include_router(schema.router)
 app.include_router(admin_routes.router)
 app.include_router(data_sources.router)
 app.include_router(chat_history.router)
+app.include_router(file_analysis.router)
 
 
 # ---------------------------------------------------------------------------
