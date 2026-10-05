@@ -75,7 +75,8 @@ class Settings:
     default_admin_name: str = os.getenv("DEFAULT_ADMIN_NAME", "Admin")
 
     # Google OAuth
-    google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "your-google-client-id.apps.googleusercontent.com")
+    google_client_id:     str = os.getenv("GOOGLE_CLIENT_ID",     "your-google-client-id.apps.googleusercontent.com")
+    google_client_secret: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
 @lru_cache()
 def get_settings() -> Settings:

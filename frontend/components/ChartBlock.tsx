@@ -1,13 +1,20 @@
 'use client';
 import { useEffect, useRef } from 'react';
 import {
-  Chart, CategoryScale, LinearScale, BarElement, ArcElement,
-  LineElement, PointElement, Title, Tooltip, Legend,
+  Chart,
+  CategoryScale, LinearScale,
+  BarElement, BarController,
+  ArcElement, DoughnutController, PieController,
+  LineElement, PointElement, LineController,
+  Title, Tooltip, Legend,
 } from 'chart.js';
 
 Chart.register(
-  CategoryScale, LinearScale, BarElement, ArcElement,
-  LineElement, PointElement, Title, Tooltip, Legend
+  CategoryScale, LinearScale,
+  BarElement, BarController,
+  ArcElement, DoughnutController, PieController,
+  LineElement, PointElement, LineController,
+  Title, Tooltip, Legend
 );
 
 interface Props {

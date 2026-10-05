@@ -419,9 +419,21 @@ async def _stream_response(
     # ------------------------------------------------------------------
     # 8. Store turn in RAG (CPU-bound encode → thread, fire-and-forget)
     # ------------------------------------------------------------------
+    # 8. Store turn in RAG + write AuditLog
+    # ------------------------------------------------------------------
     asyncio.ensure_future(
         asyncio.to_thread(rag.add, question, full_explanation)
     )
+
+    # Fire-and-forget audit log write
+    asyncio.ensure_future(_write_audit_log(
+        user_id=_current_user_id,
+        question=question,
+        sql_used=validated_sql,
+        row_count=res.row_count,
+        timing_ms=res.timing_ms,
+        status="success",
+    ))
 
     # ------------------------------------------------------------------
     # 9. Done frame

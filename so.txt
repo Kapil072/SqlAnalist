@@ -5,15 +5,13 @@ $env:TARGET_DB_URL="mysql+pymysql://root:Root@localhost:3306/analytics"
 D:\worksbot\project3.0\sqlanalyst\.venv\Scripts\uvicorn.exe app.main:app --host 0.0.0.0 --port 8000 --reload
 
 
-uI 
 
-cd D:\worksbot\project3.0\sqlanalyst\frontend
-python -m http.server 5173 --bind 127.0.0.1
 
 next js 
 
+cd D:\worksbot\project3.0\sqlanalyst\frontend
+npm run dev
 
-PS D:\worksbot\project3.0\sqlanalyst\nextjs-frontend> npm run dev
 
 
 cd D:\worksbot\project3.0\sqlanalyst

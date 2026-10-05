@@ -1,8 +1,8 @@
 'use client';
-import { useEffect, useState, useCallback, createContext, useContext } from 'react';
+import { useEffect, useState, useCallback, useMemo, createContext, useContext } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  getToken,
+  getToken, isTokenValid,
   fetchSchema, refreshSchema as apiRefreshSchema,
   fetchHealth, fetchChatHistory,
   TableInfo, ChatMessage, HealthData,
@@ -35,7 +35,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   // Single mount effect — auth guard + data loading
   useEffect(() => {
     setMounted(true);
-    if (!getToken()) {
+    if (!getToken() || !isTokenValid()) {
+      localStorage.removeItem('sqlanalyst_token');
+      localStorage.removeItem('sqlanalyst_user');
       router.replace('/auth');
       return;
     }
@@ -71,10 +73,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     window.dispatchEvent(new Event('new-chat'));
   }, []);
 
-  const ctxValue: DashCtx = {
+  const ctxValue = useMemo(() => ({
     injectPrompt: injector,
-    setInjectPrompt: (fn) => setInjector(() => fn),
-  };
+    setInjectPrompt: (fn: (q: string) => void) => setInjector(() => fn),
+  }), [injector]); // only recreates when injector changes
 
   // Don't render until mounted — prevents SSR/hydration mismatch
   if (!mounted) {

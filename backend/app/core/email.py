@@ -100,12 +100,12 @@ def send_password_reset_email(to_email: str, name: str, token: str) -> None:
     Send a password-reset link.
     In dev mode (no SMTP) the token is printed to the log instead.
     """
-    reset_url = f"{settings.app_url}/auth.html?reset_token={token}"
+    reset_url = f"{settings.app_url}/auth?reset_token={token}"
 
     if not settings.smtp_configured:
         logger.info(
             f"[EMAIL DEV] Password reset link for {to_email}:\n  {reset_url}\n"
-            f"  (copy this URL to reset without SMTP)"
+            f"  (visit this URL to reset — go to http://localhost:3000{reset_url.replace(settings.app_url,'')})"
         )
         return
 

@@ -7,6 +7,16 @@ export function getToken(): string | null {
   return localStorage.getItem('sqlanalyst_token');
 }
 
+// Checks JWT expiry from the token payload — no external library needed
+export function isTokenValid(): boolean {
+  const t = localStorage.getItem('sqlanalyst_token');
+  if (!t) return false;
+  try {
+    const payload = JSON.parse(atob(t.split('.')[1]));
+    return Date.now() / 1000 < (payload.exp ?? 0) - 30; // 30s buffer
+  } catch { return false; }
+}
+
 export function getUser(): Record<string, string> | null {
   if (typeof window === 'undefined') return null;
   try {
@@ -198,6 +208,7 @@ export async function fetchAuditLogs(skip = 0, limit = 50, status?: string): Pro
 // ─── Data Sources ─────────────────────────────────────────────
 export interface DataSource {
   id: string;
+  user_id?: string;
   name: string;
   db_type: string;
   host?: string;
@@ -208,10 +219,53 @@ export interface DataSource {
   created_at: string;
 }
 
+export interface DataSourceCreate {
+  name: string;
+  db_type: string;
+  host?: string;
+  port?: number;
+  username?: string;
+  database_name?: string;
+  password?: string;
+}
+
 export async function fetchDataSources(): Promise<{ total: number; data_sources: DataSource[] }> {
   const res = await authFetch('/data-sources');
   if (!res.ok) throw new Error('Failed to fetch data sources');
   return res.json();
+}
+
+export async function createDataSource(data: DataSourceCreate): Promise<DataSource> {
+  const res = await authFetch('/data-sources', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(data),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.detail || 'Failed to create data source');
+  return json;
+}
+
+export async function updateDataSource(id: string, data: Partial<DataSourceCreate & { is_active: boolean }>): Promise<DataSource> {
+  const res = await authFetch(`/data-sources/${id}`, {
+    method:  'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(data),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.detail || 'Failed to update data source');
+  return json;
+}
+
+export async function testDataSourceConnection(data: DataSourceCreate): Promise<{ success: boolean; message: string; execution_time_ms?: number }> {
+  const res = await authFetch('/data-sources/test', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(data),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.detail || 'Test failed');
+  return json;
 }
 
 export async function deleteDataSource(id: string): Promise<void> {

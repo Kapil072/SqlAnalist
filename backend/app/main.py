@@ -3,13 +3,11 @@ FastAPI application for SQLAnalyst.
 Provides AI-powered SQL analysis, authentication, and admin panel.
 """
 
-import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy import text, select
 
 from app.config import settings
@@ -18,6 +16,7 @@ from app.db.session import engine as app_engine, AsyncSessionLocal
 from app.db.base import Base
 from app.models import user, otp  # noqa: F401 — ensures tables are registered
 from app.utils.logger import logger
+from app.core.security import get_current_user as get_current_user_dep
 from app.api.routes import ask, auth, schema
 from app.api.routes import admin as admin_routes
 from app.api.routes import data_sources
@@ -105,10 +104,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — permissive for development (tighten for production)
+# CORS — list explicit origins for production
+# In development we allow localhost:3000 (Next.js) and localhost:8000 (API docs)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -124,42 +128,6 @@ app.include_router(admin_routes.router)
 app.include_router(data_sources.router)
 app.include_router(chat_history.router)
 app.include_router(file_analysis.router)
-
-
-# ---------------------------------------------------------------------------
-# Static frontend
-# ---------------------------------------------------------------------------
-
-FRONTEND_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
-)
-if os.path.isdir(FRONTEND_DIR):
-    from fastapi.staticfiles import StaticFiles
-    app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
-
-
-@app.get("/", include_in_schema=False)
-def serve_index():
-    index_path = os.path.join(FRONTEND_DIR, "index.html")
-    if os.path.exists(index_path):
-        return FileResponse(index_path)
-    return {"message": "SQLAnalyst API is running. Visit /docs for Swagger UI."}
-
-
-@app.get("/auth.html", include_in_schema=False)
-def serve_auth():
-    auth_path = os.path.join(FRONTEND_DIR, "auth.html")
-    if os.path.exists(auth_path):
-        return FileResponse(auth_path)
-    raise HTTPException(status_code=404, detail="Auth page not found")
-
-
-@app.get("/admin.html", include_in_schema=False)
-def serve_admin():
-    admin_path = os.path.join(FRONTEND_DIR, "admin.html")
-    if os.path.exists(admin_path):
-        return FileResponse(admin_path)
-    raise HTTPException(status_code=404, detail="Admin page not found")
 
 
 # ---------------------------------------------------------------------------
@@ -185,11 +153,15 @@ def health_check():
 
 
 # ---------------------------------------------------------------------------
-# Simple query endpoint
+# Raw SQL query endpoint  (authenticated, SELECT-only)
 # ---------------------------------------------------------------------------
 
 @app.post("/api/query", tags=["analysis"])
-def run_query(payload: dict):
+def run_query(
+    payload: dict,
+    current_user=Depends(get_current_user_dep),
+):
+    """Execute a raw SELECT query against the target database. Requires auth."""
     sql = payload.get("sql")
     if not sql:
         raise HTTPException(status_code=400, detail="Missing 'sql' in request payload")
