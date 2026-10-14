@@ -22,5 +22,6 @@ def setup_logger(name: str = "sqlanalyst") -> logging.Logger:
         logger.addHandler(handler)
     return logger
 
+
 # Export a default logger instance for convenience
 logger = setup_logger()

@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { Inter, Outfit, JetBrains_Mono } from 'next/font/google';
+import { MotionProvider } from '@/components/motion';
 import './globals.css';
 
 const inter = Inter({
@@ -26,12 +27,9 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html
-      lang="en"
-      className={`${inter.variable} ${outfit.variable} ${jetbrains.variable}`}
-    >
-      <body className="min-h-screen bg-gradient-to-br from-teal-50 to-teal-100">
-        {children}
+    <html lang="en" className={`${inter.variable} ${outfit.variable} ${jetbrains.variable}`}>
+      <body className="min-h-screen bg-slate-50 text-slate-800">
+        <MotionProvider>{children}</MotionProvider>
       </body>
     </html>
   );

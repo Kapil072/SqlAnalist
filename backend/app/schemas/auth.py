@@ -1,5 +1,6 @@
 import re
-from pydantic import BaseModel, EmailStr, field_validator
+
+from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 
 
 class RegisterRequest(BaseModel):
@@ -33,14 +34,14 @@ class LoginRequest(BaseModel):
 
 
 class UserInToken(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     name: str
     email: str
     role: str
     email_verified: bool = False
-
-    class Config:
-        from_attributes = True
+    avatar_url: str | None = None
 
 
 class TokenResponse(BaseModel):
@@ -73,8 +74,10 @@ class ResetPasswordRequest(BaseModel):
 # OTP
 # ---------------------------------------------------------------------------
 
+
 class SendOTPRequest(BaseModel):
     email: EmailStr
+
 
 class VerifyOTPRequest(BaseModel):
     email: EmailStr

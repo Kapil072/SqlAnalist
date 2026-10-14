@@ -2,48 +2,61 @@
 import { Suspense, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { saveSession } from '@/lib/api';
+import LoadingScreen from '@/components/LoadingScreen';
 
 function GoogleSuccessInner() {
   const router = useRouter();
-  const params = useSearchParams();
+  const query = useSearchParams();
 
   useEffect(() => {
-    const token = params.get('token');
-    const name  = params.get('name')  || '';
-    const email = params.get('email') || '';
-    const role  = params.get('role')  || 'user';
-    const id    = params.get('id')    || '';
+    // The backend puts the token in the URL fragment (#token=...) so it is
+    // never sent to any server or written to logs. Fall back to the query
+    // string for older backends.
+    const hash = typeof window !== 'undefined' ? window.location.hash.replace(/^#/, '') : '';
+    const params = hash ? new URLSearchParams(hash) : query;
 
-    if (!token) { router.replace('/auth?error=google_failed'); return; }
+    const token = params.get('token');
+    const name = params.get('name') || '';
+    const email = params.get('email') || '';
+    const role = params.get('role') || 'user';
+    const id = params.get('id') || '';
+    const avatar_url = params.get('avatar_url') || '';
+
+    // Remove the token from the address bar / browser history
+    if (typeof window !== 'undefined') {
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+
+    if (!token) {
+      router.replace('/auth?error=google_failed');
+      return;
+    }
 
     saveSession({
       access_token: token,
-      user: { id, name, email, role, email_verified: 'true' },
+      user: { id, name, email, role, avatar_url, email_verified: 'true' },
     });
     router.replace('/dashboard');
-  }, [params, router]);
+  }, [query, router]);
 
   return (
-    <div className="flex items-center justify-center min-h-screen
-                    bg-gradient-to-br from-teal-50 to-teal-100">
-      <div className="flex flex-col items-center gap-3">
-        <div className="w-10 h-10 rounded-full border-2 border-teal-500
-                        border-t-transparent animate-spin" />
-        <p className="text-sm text-teal-600 font-medium">Signing you in with Google…</p>
-      </div>
-    </div>
+    <LoadingScreen
+      message="Signing you in with Google…"
+      subMessage="Syncing your profile and redirecting to dashboard"
+    />
   );
 }
 
 export default function GoogleSuccessPage() {
   return (
-    <Suspense fallback={
-      <div className="flex items-center justify-center min-h-screen
-                      bg-gradient-to-br from-teal-50 to-teal-100">
-        <div className="w-10 h-10 rounded-full border-2 border-teal-500
-                        border-t-transparent animate-spin" />
-      </div>
-    }>
+    <Suspense
+      fallback={
+        <LoadingScreen
+          message="Signing you in with Google…"
+          subMessage="Connecting to your Google profile"
+        />
+      }
+    >
       <GoogleSuccessInner />
     </Suspense>
   );

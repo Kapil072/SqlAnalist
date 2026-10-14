@@ -9,12 +9,15 @@ export function getToken(): string | null {
 
 // Checks JWT expiry from the token payload — no external library needed
 export function isTokenValid(): boolean {
+  if (typeof window === 'undefined') return false;
   const t = localStorage.getItem('sqlanalyst_token');
   if (!t) return false;
   try {
     const payload = JSON.parse(atob(t.split('.')[1]));
     return Date.now() / 1000 < (payload.exp ?? 0) - 30; // 30s buffer
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
 export function getUser(): Record<string, string> | null {
@@ -30,12 +33,54 @@ export function getUser(): Record<string, string> | null {
 export function saveSession(data: { access_token: string; user: Record<string, string> }) {
   localStorage.setItem('sqlanalyst_token', data.access_token);
   localStorage.setItem('sqlanalyst_user', JSON.stringify(data.user));
+  // Notify same-tab listeners (e.g. Navbar) — `storage` event only fires in OTHER tabs
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('session-updated', { detail: data.user }));
+  }
 }
 
 export function clearSession() {
+  if (typeof window === 'undefined') return;
   localStorage.removeItem('sqlanalyst_token');
   localStorage.removeItem('sqlanalyst_user');
   sessionStorage.removeItem('sqlanalyst_session_id');
+}
+
+// ─── Silent token refresh ────────────────────────────────────
+// Access tokens live 15 minutes. The backend also sets an httpOnly
+// refresh-token cookie; POST /auth/refresh swaps it for a new access token.
+// One refresh at a time — concurrent callers share the same promise.
+let refreshInFlight: Promise<boolean> | null = null;
+
+export function refreshAccessToken(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    try {
+      const res = await fetch(API + '/auth/refresh', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (!data?.access_token) return false;
+      saveSession(data);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      // allow a new refresh on the next expiry
+      setTimeout(() => {
+        refreshInFlight = null;
+      }, 0);
+    }
+  })();
+  return refreshInFlight;
+}
+
+/** Make sure a non-expired access token is available (refreshing if needed). */
+export async function ensureFreshToken(): Promise<boolean> {
+  if (isTokenValid()) return true;
+  return refreshAccessToken();
 }
 
 export function authHeaders(): Record<string, string> {
@@ -43,25 +88,64 @@ export function authHeaders(): Record<string, string> {
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
+// ─── Error text from an API response ─────────────────────────
+// FastAPI returns `detail` as a string, or as a list of validation errors
+// (422) — turn either into a readable message.
+export function errorText(body: unknown, fallback: string): string {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  if (typeof detail === 'string' && detail) return detail;
+  if (Array.isArray(detail)) {
+    const msgs = detail
+      .map((e: { msg?: string; loc?: unknown[] }) => {
+        const field = Array.isArray(e.loc) ? String(e.loc[e.loc.length - 1] ?? '') : '';
+        const msg = (e.msg || '').replace(/^Value error, /, '');
+        return field && field !== 'body' ? `${field}: ${msg}` : msg;
+      })
+      .filter(Boolean);
+    if (msgs.length) return msgs.join(' · ');
+  }
+  return fallback;
+}
+
 // ─── Generic fetch with auth ─────────────────────────────────
-export async function authFetch(path: string, opts: RequestInit = {}) {
-  return fetch(API + path, {
-    ...opts,
-    headers: { ...authHeaders(), ...(opts.headers as Record<string, string> || {}) },
-  });
+// Accepts a path ("/api/schema") or a full URL. Refreshes the access token
+// when it is about to expire, and retries once on a 401.
+export async function authFetch(pathOrUrl: string, opts: RequestInit = {}) {
+  const url = /^https?:\/\//.test(pathOrUrl) ? pathOrUrl : API + pathOrUrl;
+  const doFetch = () =>
+    fetch(url, {
+      credentials: 'include',
+      ...opts,
+      headers: { ...authHeaders(), ...((opts.headers as Record<string, string>) || {}) },
+    });
+
+  if (getToken() && !isTokenValid()) await refreshAccessToken();
+  let res = await doFetch();
+  if (res.status === 401 && getToken()) {
+    if (await refreshAccessToken()) {
+      res = await doFetch();
+    } else {
+      clearSession();
+    }
+  }
+  return res;
 }
 
 // ─── Typed API calls ─────────────────────────────────────────
 export async function apiPost<T = unknown>(path: string, body: unknown): Promise<T> {
+  // credentials: 'include' so the refresh-token cookie set by /auth/login,
+  // /auth/verify-otp etc. is stored by the browser
   const res = await fetch(API + path, {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   });
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     let msg = data.detail;
-    if (Array.isArray(msg)) msg = msg.map((e: { msg?: string }) => e.msg || JSON.stringify(e)).join(', ');
+    if (Array.isArray(msg))
+      msg = msg.map((e: { msg?: string }) => e.msg || JSON.stringify(e)).join(', ');
     else if (typeof msg === 'object' && msg) msg = JSON.stringify(msg);
     const err = new Error(msg || 'Request failed') as Error & { status: number };
     err.status = res.status;
@@ -81,18 +165,84 @@ export async function fetchHealth(): Promise<HealthData> {
 }
 
 // ─── Schema ──────────────────────────────────────────────────
-export interface Column { name: string; type: string; nullable?: boolean }
-export interface TableInfo { name: string; row_count: number; columns: Column[] }
-export interface SchemaData { tables: TableInfo[]; suggestions?: string[] }
+export interface Column {
+  name: string;
+  type: string;
+  nullable?: boolean;
+}
+export interface ForeignKey {
+  columns: string[];
+  ref_table: string;
+  ref_columns: string[];
+}
+export interface TableInfo {
+  name: string;
+  row_count: number | null;
+  columns: Column[];
+  primary_key?: string[];
+  foreign_keys?: ForeignKey[];
+}
+export interface SchemaData {
+  tables: TableInfo[];
+  suggestions?: string[];
+}
 
-export async function fetchSchema(): Promise<SchemaData> {
-  const res = await authFetch('/api/schema');
-  if (!res.ok) throw new Error('Failed to load schema');
+// ─── Database sources (chat can target any of them) ──────────
+// "default" = the database in TARGET_DB_URL; other ids are data sources
+// added by an admin in the Admin → Data Sources tab.
+export const DEFAULT_SOURCE_ID = 'default';
+
+export interface SourceInfo {
+  id: string;
+  name: string;
+  db_type: string;
+  is_default: boolean;
+}
+
+export async function fetchSources(): Promise<SourceInfo[]> {
+  const res = await authFetch('/sources');
+  if (!res.ok) throw new Error('Failed to load databases');
+  const data = await res.json();
+  return data.sources || [];
+}
+
+export async function fetchSourceSchema(sourceId: string): Promise<SchemaData> {
+  const res = await authFetch(`/sources/${encodeURIComponent(sourceId)}/schema`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(errorText(err, 'Failed to load schema'));
+  }
   return res.json();
 }
 
-export async function refreshSchema(): Promise<void> {
-  await authFetch('/api/schema/refresh', { method: 'POST' });
+export async function refreshSourceSchema(sourceId: string): Promise<SchemaData> {
+  const res = await authFetch(`/sources/${encodeURIComponent(sourceId)}/refresh`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(errorText(err, 'Schema refresh failed'));
+  }
+  return res.json();
+}
+
+const SOURCE_KEY = 'sqlanalyst_source';
+
+export function getSavedSourceId(): string {
+  if (typeof window === 'undefined') return DEFAULT_SOURCE_ID;
+  try {
+    return localStorage.getItem(SOURCE_KEY) || DEFAULT_SOURCE_ID;
+  } catch {
+    return DEFAULT_SOURCE_ID;
+  }
+}
+
+export function saveSourceId(id: string) {
+  try {
+    localStorage.setItem(SOURCE_KEY, id);
+  } catch {
+    /* ignore */
+  }
 }
 
 // ─── Chat history ────────────────────────────────────────────
@@ -129,7 +279,8 @@ export async function saveChatMessage(payload: {
 
 // ─── Auth ────────────────────────────────────────────────────
 export async function logout(): Promise<void> {
-  await authFetch('/auth/logout', { method: 'POST' }).catch(() => {});
+  // The server revokes all tokens for this user and clears the cookie
+  await fetch(API + '/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
   clearSession();
 }
 
@@ -159,6 +310,7 @@ export interface AdminUser {
   role: string;
   is_active: boolean;
   email_verified: boolean;
+  avatar_url?: string;
   created_at: string;
 }
 
@@ -180,24 +332,34 @@ export async function fetchAdminStats(): Promise<AdminStats> {
   return res.json();
 }
 
-export async function fetchAdminUsers(skip = 0, limit = 50): Promise<{ total: number; users: AdminUser[] }> {
+export async function fetchAdminUsers(
+  skip = 0,
+  limit = 50,
+): Promise<{ total: number; users: AdminUser[] }> {
   const res = await authFetch(`/admin/users?skip=${skip}&limit=${limit}`);
   if (!res.ok) throw new Error('Failed to fetch users');
   return res.json();
 }
 
-export async function updateAdminUser(userId: string, body: { role?: string; is_active?: boolean }): Promise<AdminUser> {
+export async function updateAdminUser(
+  userId: string,
+  body: { role?: string; is_active?: boolean },
+): Promise<AdminUser> {
   const res = await authFetch(`/admin/users/${userId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || 'Update failed');
+  if (!res.ok) throw new Error(errorText(data, 'Update failed'));
   return data;
 }
 
-export async function fetchAuditLogs(skip = 0, limit = 50, status?: string): Promise<{ total: number; logs: AuditLog[] }> {
+export async function fetchAuditLogs(
+  skip = 0,
+  limit = 50,
+  status?: string,
+): Promise<{ total: number; logs: AuditLog[] }> {
   const qs = new URLSearchParams({ skip: String(skip), limit: String(limit) });
   if (status) qs.set('status', status);
   const res = await authFetch(`/admin/audit-logs?${qs}`);
@@ -237,58 +399,46 @@ export async function fetchDataSources(): Promise<{ total: number; data_sources:
 
 export async function createDataSource(data: DataSourceCreate): Promise<DataSource> {
   const res = await authFetch('/data-sources', {
-    method:  'POST',
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify(data),
+    body: JSON.stringify(data),
   });
   const json = await res.json();
-  if (!res.ok) throw new Error(json.detail || 'Failed to create data source');
+  if (!res.ok) throw new Error(errorText(json, 'Failed to create data source'));
   return json;
 }
 
-export async function updateDataSource(id: string, data: Partial<DataSourceCreate & { is_active: boolean }>): Promise<DataSource> {
+export async function updateDataSource(
+  id: string,
+  data: Partial<DataSourceCreate & { is_active: boolean }>,
+): Promise<DataSource> {
   const res = await authFetch(`/data-sources/${id}`, {
-    method:  'PATCH',
+    method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify(data),
+    body: JSON.stringify(data),
   });
   const json = await res.json();
-  if (!res.ok) throw new Error(json.detail || 'Failed to update data source');
+  if (!res.ok) throw new Error(errorText(json, 'Failed to update data source'));
   return json;
 }
 
-export async function testDataSourceConnection(data: DataSourceCreate): Promise<{ success: boolean; message: string; execution_time_ms?: number }> {
+export async function testDataSourceConnection(
+  data: DataSourceCreate,
+): Promise<{ success: boolean; message: string; execution_time_ms?: number }> {
   const res = await authFetch('/data-sources/test', {
-    method:  'POST',
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify(data),
+    body: JSON.stringify(data),
   });
   const json = await res.json();
-  if (!res.ok) throw new Error(json.detail || 'Test failed');
+  if (!res.ok) throw new Error(errorText(json, 'Test failed'));
   return json;
 }
 
 export async function deleteDataSource(id: string): Promise<void> {
-  await authFetch(`/data-sources/${id}`, { method: 'DELETE' });
-}
-
-// ─── File upload analysis ─────────────────────────────────────
-export interface FileAnalysisResult {
-  filename: string;
-  rows: number;
-  columns: string[];
-  preview: Record<string, unknown>[];
-  analysis: string;
-}
-
-export async function uploadFileForAnalysis(file: File): Promise<FileAnalysisResult> {
-  const form = new FormData();
-  form.append('file', file);
-  const res = await authFetch('/api/analyze-file', {
-    method: 'POST',
-    body: form,
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || 'Upload failed');
-  return data;
+  const res = await authFetch(`/data-sources/${id}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(errorText(json, `Failed to delete data source (HTTP ${res.status})`));
+  }
 }

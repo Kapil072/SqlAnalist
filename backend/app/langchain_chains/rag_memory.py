@@ -25,33 +25,36 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Lazy imports – keep startup fast; load heavy libs on first use
 # ---------------------------------------------------------------------------
-_faiss = None
-_SentenceTransformer = None
-_np = None
+_faiss: Any = None
+_SentenceTransformer: Any = None
+_np: Any = None
 
 
 def _load_libs():
     global _faiss, _SentenceTransformer, _np
     if _faiss is None:
         import faiss as _f
+
         _faiss = _f
     if _SentenceTransformer is None:
         from sentence_transformers import SentenceTransformer as _ST
+
         _SentenceTransformer = _ST
     if _np is None:
         import numpy as _n
+
         _np = _n
 
 
 # ---------------------------------------------------------------------------
 # Embedding model (shared across all sessions – loaded once)
 # ---------------------------------------------------------------------------
-_embed_model: Optional[object] = None
+_embed_model: object | None = None
 _embed_lock = threading.Lock()
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"  # small, fast, 384-dim
 
@@ -76,7 +79,7 @@ def warmup() -> None:
     model.encode(["warmup"], convert_to_numpy=True)
 
 
-def _embed(texts: List[str]):
+def _embed(texts: list[str]):
     """Return a (n, dim) float32 numpy array."""
     _load_libs()
     model = _get_embed_model()
@@ -98,8 +101,8 @@ class SessionRAG:
     """
 
     session_id: str
-    _texts: List[str] = field(default_factory=list)
-    _index: Optional[object] = field(default=None, repr=False)
+    _texts: list[str] = field(default_factory=list)
+    _index: Any = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     # ------------------------------------------------------------------
@@ -120,7 +123,7 @@ class SessionRAG:
                 self._index = _faiss.IndexFlatIP(dim)
             self._index.add(vec)
 
-    def retrieve(self, query: str, top_k: int = 3) -> List[str]:
+    def retrieve(self, query: str, top_k: int = 3) -> list[str]:
         """
         Return the top-k most relevant past Q&A snippets for *query*.
         Returns an empty list if the index is empty.
@@ -149,7 +152,7 @@ class SessionRAG:
 # ---------------------------------------------------------------------------
 # Global session registry
 # ---------------------------------------------------------------------------
-_sessions: Dict[str, SessionRAG] = {}
+_sessions: dict[str, SessionRAG] = {}
 _registry_lock = threading.Lock()
 
 MAX_SESSIONS = 500  # safety cap – oldest sessions evicted if exceeded
@@ -165,14 +168,3 @@ def get_session_rag(session_id: str) -> SessionRAG:
                 del _sessions[oldest_key]
             _sessions[session_id] = SessionRAG(session_id=session_id)
         return _sessions[session_id]
-
-
-def clear_session_rag(session_id: str) -> None:
-    """Remove a session's RAG store (call on explicit logout/clear)."""
-    with _registry_lock:
-        _sessions.pop(session_id, None)
-
-
-def session_count() -> int:
-    """Diagnostic: number of active RAG sessions in memory."""
-    return len(_sessions)

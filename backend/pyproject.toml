@@ -1,0 +1,23 @@
+# Formatting and linting for the backend: `ruff format .` and `ruff check .`
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["docs", "data", "logs"]
+
+[tool.ruff.lint]
+# pyflakes, pycodestyle errors, import sorting, pyupgrade, bugbear-lite
+select = ["F", "E", "W", "I", "UP"]
+ignore = [
+    "E501",   # long lines are left to the formatter
+    "B008",   # FastAPI's Depends() in defaults is intended
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ruff.lint.per-file-ignores]
+# The script sets sys.path / cwd before importing the app on purpose
+"cleanup_users.py" = ["E402"]

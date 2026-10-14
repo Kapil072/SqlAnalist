@@ -6,12 +6,9 @@ GET  /chat/history   — return the last N turns for the current user
 DELETE /chat/history — clear all history for the current user
 """
 
-import uuid
-from typing import Any, Dict, List, Optional
-
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import select, delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user
@@ -26,30 +23,19 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 # Schemas
 # ---------------------------------------------------------------------------
 
+
 class SaveMessageRequest(BaseModel):
     question: str
-    sql_query: Optional[str] = None
-    explanation: Optional[str] = None
-    engine_used: Optional[str] = None
-    session_id: Optional[str] = None
-
-
-class ChatMessageOut(BaseModel):
-    id: str
-    question: str
-    sql_query: Optional[str]
-    explanation: Optional[str]
-    engine_used: Optional[str]
-    session_id: Optional[str]
-    created_at: str
-
-    class Config:
-        from_attributes = True
+    sql_query: str | None = None
+    explanation: str | None = None
+    engine_used: str | None = None
+    session_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
 
 @router.post("/save", status_code=201)
 async def save_message(
@@ -74,7 +60,7 @@ async def save_message(
 
 @router.get("/history")
 async def get_history(
-    limit: int = 30,
+    limit: int = Query(30, ge=1, le=200),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -108,7 +94,5 @@ async def clear_history(
     db: AsyncSession = Depends(get_db),
 ):
     """Delete all chat history for the current user."""
-    await db.execute(
-        delete(ChatMessage).where(ChatMessage.user_id == current_user.id)
-    )
+    await db.execute(delete(ChatMessage).where(ChatMessage.user_id == current_user.id))
     await db.commit()

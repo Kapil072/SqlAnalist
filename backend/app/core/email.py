@@ -3,9 +3,12 @@ Email sender utility using smtplib.
 In development (SMTP not configured), tokens are logged to the console so you
 can still test without a real mail server.
 """
+
 import smtplib
-from email.mime.text import MIMEText
+import socket
+import ssl
 from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 from app.config import settings
 from app.utils.logger import logger
@@ -14,24 +17,76 @@ from app.utils.logger import logger
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
+def _password() -> str:
+    # Gmail shows App Passwords as "abcd efgh ijkl mnop" — the spaces are not part of it
+    return settings.smtp_password.replace(" ", "").strip()
+
+
 def _send(to_email: str, subject: str, html: str) -> None:
-    """Send an HTML email via SMTP. Raises on error (caller handles)."""
+    """Send an HTML email via SMTP. Raises on error (caller handles).
+
+    Port 465 uses SSL from the start; any other port (587, 25, 2525) uses
+    STARTTLS. Both work with Gmail.
+    """
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = settings.smtp_from
+    msg["From"] = settings.smtp_from or settings.smtp_user
     msg["To"] = to_email
     msg.attach(MIMEText(html, "html"))
 
-    with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port) as server:
-        server.login(settings.smtp_user, settings.smtp_password)
-        server.sendmail(settings.smtp_from, to_email, msg.as_string())
+    context = ssl.create_default_context()
+    timeout = settings.smtp_timeout
+    server: smtplib.SMTP
+    if settings.smtp_port == 465:
+        server = smtplib.SMTP_SSL(
+            settings.smtp_host, settings.smtp_port, timeout=timeout, context=context
+        )
+    else:
+        server = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=timeout)
+        server.ehlo()
+        server.starttls(context=context)
+        server.ehlo()
+    with server:
+        server.login(settings.smtp_user, _password())
+        server.sendmail(msg["From"], [to_email], msg.as_string())
+
+
+def explain_smtp_error(exc: Exception) -> str:
+    """Turn a low-level SMTP/socket error into a fix the admin can act on."""
+    host = settings.smtp_host
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        hint = (
+            "the mail server rejected SMTP_USER / SMTP_PASSWORD."
+            " For Gmail, turn on 2-Step Verification and use a 16-letter App Password"
+            " (myaccount.google.com/apppasswords), not your normal password."
+        )
+    elif isinstance(exc, smtplib.SMTPSenderRefused):
+        hint = "SMTP_FROM is not allowed to send — for Gmail make it the same as SMTP_USER."
+    elif isinstance(exc, smtplib.SMTPRecipientsRefused):
+        hint = "the recipient address was refused by the mail server."
+    elif isinstance(exc, ssl.SSLError):
+        hint = (
+            f"SSL handshake failed on port {settings.smtp_port}. Use SMTP_PORT=465 (SSL)"
+            " or SMTP_PORT=587 (STARTTLS) — they are not interchangeable."
+        )
+    elif isinstance(exc, socket.gaierror):
+        hint = f"cannot find mail server '{host}' — check SMTP_HOST and your internet connection."
+    elif isinstance(exc, (TimeoutError, socket.timeout, ConnectionRefusedError, OSError)):
+        hint = (
+            f"could not reach {host}:{settings.smtp_port} — a firewall, antivirus or network"
+            " is blocking it. Try SMTP_PORT=587 (or 465 if you were on 587)."
+        )
+    else:
+        hint = "unexpected mail error."
+    return f"{hint} [{type(exc).__name__}: {exc}]"
 
 
 def _btn(url: str, label: str) -> str:
     """Return an HTML button anchor tag."""
     return (
         f'<a href="{url}" style="display:inline-block;background:#6366f1;color:#fff;'
-        f'padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold;'
+        f"padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold;"
         f'font-size:15px;">{label}</a>'
     )
 
@@ -40,74 +95,21 @@ def _btn(url: str, label: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def send_welcome_email(to_email: str, name: str) -> None:
-    """Send a welcome email. Silently skips if SMTP is not configured."""
-    if not settings.smtp_configured:
-        logger.info(
-            f"[EMAIL SKIP] Welcome email would have been sent to {to_email} "
-            "(SMTP not configured)"
-        )
-        return
-    html = f"""
-    <html><body style="font-family:sans-serif;max-width:600px;margin:auto;padding:40px;">
-      <h2 style="color:#6366f1;">Hi {name}, welcome aboard! 🎉</h2>
-      <p>Your account is ready. Start asking questions about your data:</p>
-      {_btn(settings.app_url, "Open SQL Analyst AI")}
-      <p style="margin-top:32px;color:#666;">— The SQL Analyst AI Team</p>
-    </body></html>
-    """
-    try:
-        _send(to_email, "Welcome to SQL Analyst AI 🎉", html)
-        logger.info(f"[EMAIL] Welcome email sent to {to_email}")
-    except Exception as exc:
-        logger.warning(f"[EMAIL] Failed to send welcome email to {to_email}: {exc}")
 
-
-def send_verification_email(to_email: str, name: str, token: str) -> None:
-    """
-    Send an email-verification link.
-    In dev mode (no SMTP) the token is printed to the log instead.
-    """
-    verify_url = f"{settings.app_url}/auth/verify-email?token={token}"
-
-    if not settings.smtp_configured:
-        logger.info(
-            f"[EMAIL DEV] Verification link for {to_email}:\n  {verify_url}\n"
-            f"  (copy this URL to verify without SMTP)"
-        )
-        return
-
-    html = f"""
-    <html><body style="font-family:sans-serif;max-width:600px;margin:auto;padding:40px;">
-      <h2 style="color:#6366f1;">Verify your email, {name}</h2>
-      <p>Click the button below to confirm your email address.
-         The link expires in 24 hours.</p>
-      {_btn(verify_url, "Verify Email Address")}
-      <p style="margin-top:24px;color:#888;font-size:13px;">
-        If you did not create an account, you can safely ignore this email.
-      </p>
-    </body></html>
-    """
-    try:
-        _send(to_email, "Verify your SQL Analyst AI account", html)
-        logger.info(f"[EMAIL] Verification email sent to {to_email}")
-    except Exception as exc:
-        logger.warning(f"[EMAIL] Failed to send verification email to {to_email}: {exc}")
-
-
-def send_password_reset_email(to_email: str, name: str, token: str) -> None:
+def send_password_reset_email(to_email: str, name: str, token: str) -> bool:
     """
     Send a password-reset link.
+    Returns True if sent, False if SMTP not configured or failed.
     In dev mode (no SMTP) the token is printed to the log instead.
     """
-    reset_url = f"{settings.app_url}/auth?reset_token={token}"
+    reset_url = f"{settings.frontend_url}/auth?reset_token={token}"
 
     if not settings.smtp_configured:
         logger.info(
             f"[EMAIL DEV] Password reset link for {to_email}:\n  {reset_url}\n"
-            f"  (visit this URL to reset — go to http://localhost:3000{reset_url.replace(settings.app_url,'')})"
+            f"  (visit this URL to reset)"
         )
-        return
+        return False
 
     html = f"""
     <html><body style="font-family:sans-serif;max-width:600px;margin:auto;padding:40px;">
@@ -124,9 +126,10 @@ def send_password_reset_email(to_email: str, name: str, token: str) -> None:
     try:
         _send(to_email, "Reset your SQL Analyst AI password", html)
         logger.info(f"[EMAIL] Password reset email sent to {to_email}")
+        return True
     except Exception as exc:
-        logger.warning(f"[EMAIL] Failed to send reset email to {to_email}: {exc}")
-
+        logger.error(f"[EMAIL] Reset email to {to_email} failed — {explain_smtp_error(exc)}")
+        return False
 
 
 def send_otp_email(to_email: str, name: str, code: str) -> bool:
@@ -137,8 +140,7 @@ def send_otp_email(to_email: str, name: str, code: str) -> bool:
     """
     if not settings.smtp_configured:
         logger.info(
-            f"[EMAIL DEV] OTP for {to_email}  →  {code}  "
-            f"(SMTP not configured — check server logs)"
+            f"[EMAIL DEV] OTP for {to_email}  →  {code}  (SMTP not configured — check server logs)"
         )
         return False
 
@@ -164,5 +166,5 @@ def send_otp_email(to_email: str, name: str, code: str) -> bool:
         logger.info(f"[EMAIL] OTP sent to {to_email}")
         return True
     except Exception as exc:
-        logger.warning(f"[EMAIL] Failed to send OTP to {to_email}: {exc}")
+        logger.error(f"[EMAIL] OTP email to {to_email} failed — {explain_smtp_error(exc)}")
         return False

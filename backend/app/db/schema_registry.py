@@ -13,10 +13,11 @@ Flow
 import json
 import os
 from functools import lru_cache
-from typing import Any, Dict, Set
+from typing import Any
 
 from sqlalchemy import inspect, text
 
+from app.db.table_rules import table_rules
 from app.utils.logger import logger
 
 _SCHEMA_CACHE_PATH = os.path.abspath(
@@ -28,15 +29,16 @@ _SCHEMA_CACHE_PATH = os.path.abspath(
 # Live introspection
 # ---------------------------------------------------------------------------
 
-def _introspect_db() -> Dict[str, Any]:
+
+def _introspect_db() -> dict[str, Any]:
     """
     Connect to the target DB, walk every table, and return a schema dict.
     Works with MySQL, PostgreSQL, SQLite, SQL Server, Oracle.
     """
-    from app.db.connection import get_engine   # get the REAL engine, not the proxy
+    from app.db.connection import get_engine  # get the REAL engine, not the proxy
 
     real_engine = get_engine()
-    schema: Dict[str, Any] = {"tables": {}}
+    schema: dict[str, Any] = {"tables": {}}
 
     try:
         inspector = inspect(real_engine)
@@ -49,11 +51,16 @@ def _introspect_db() -> Dict[str, Any]:
                 cols = []
                 try:
                     for col in inspector.get_columns(table):
-                        cols.append({
-                            "name": col["name"],
-                            "type": str(col["type"]),
-                            "nullable": col.get("nullable", True),
-                        })
+                        cols.append(
+                            {
+                                "name": col["name"],
+                                "type": str(col["type"]),
+                                "nullable": col.get("nullable", True),
+                                "default": None
+                                if col.get("default") is None
+                                else str(col.get("default")),
+                            }
+                        )
                 except Exception as col_err:
                     logger.warning(f"[SCHEMA] Could not read columns for '{table}': {col_err}")
 
@@ -73,6 +80,7 @@ def _introspect_db() -> Dict[str, Any]:
                 schema["tables"][table] = {
                     "columns": cols,
                     "row_count": row_count,
+                    **table_rules(inspector, table),
                 }
 
         logger.info(f"[SCHEMA] Introspection complete: {list(schema['tables'].keys())}")
@@ -83,18 +91,18 @@ def _introspect_db() -> Dict[str, Any]:
     return schema
 
 
-def _save_cache(schema: Dict[str, Any]) -> None:
+def _save_cache(schema: dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(_SCHEMA_CACHE_PATH), exist_ok=True)
     with open(_SCHEMA_CACHE_PATH, "w", encoding="utf-8") as f:
         json.dump(schema, f, indent=2)
     logger.info(f"[SCHEMA] schema_cache.json written ({len(schema['tables'])} tables).")
 
 
-def _load_cache() -> Dict[str, Any]:
+def _load_cache() -> dict[str, Any]:
     if not os.path.exists(_SCHEMA_CACHE_PATH):
         logger.warning("[SCHEMA] schema_cache.json not found — returning empty schema.")
         return {"tables": {}}
-    with open(_SCHEMA_CACHE_PATH, "r", encoding="utf-8") as f:
+    with open(_SCHEMA_CACHE_PATH, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -102,8 +110,9 @@ def _load_cache() -> Dict[str, Any]:
 # lru_cache wrapper — cleared on every refresh
 # ---------------------------------------------------------------------------
 
+
 @lru_cache(maxsize=1)
-def _cached_schema() -> Dict[str, Any]:
+def _cached_schema() -> dict[str, Any]:
     return _load_cache()
 
 
@@ -111,12 +120,14 @@ def _cached_schema() -> Dict[str, Any]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def refresh_schema() -> Dict[str, Any]:
+
+def refresh_schema() -> dict[str, Any]:
     """
     Re-introspect the live target DB, overwrite schema_cache.json,
     and clear the in-process lru_cache.
     """
     from app.db.connection import reset_engine
+
     reset_engine()
 
     schema = _introspect_db()
@@ -132,11 +143,11 @@ def refresh_schema() -> Dict[str, Any]:
     return schema
 
 
-def get_schema() -> Dict[str, Any]:
+def get_schema() -> dict[str, Any]:
     """Return the cached schema dict (reads file once per process lifetime)."""
     return _cached_schema()
 
 
-def get_allowed_tables() -> Set[str]:
+def get_allowed_tables() -> set[str]:
     """Return the set of allowed table names (lowercase)."""
     return {t.lower() for t in get_schema().get("tables", {}).keys()}

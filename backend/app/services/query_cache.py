@@ -2,11 +2,13 @@
 Query result caching service using Redis.
 Caches query results for 5 minutes to improve performance for repeated queries.
 """
+
 import hashlib
 import json
-import time
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 import redis.asyncio as redis
+
 from app.config import settings
 from app.utils.logger import logger
 
@@ -15,16 +17,16 @@ class QueryCache:
     """Redis-based query result cache with TTL."""
 
     def __init__(self):
-        self.redis_client: Optional[redis.Redis] = None
+        self.redis_client: redis.Redis | None = None
         self.cache_ttl = 300  # 5 minutes default TTL
         self.enabled = True
 
     async def initialize(self):
         """Initialize Redis connection."""
         try:
-            # Try to connect to Redis (default localhost:6379)
-            self.redis_client = await redis.from_url(
-                "redis://localhost:6379",
+            # Connect to Redis (REDIS_URL, default redis://localhost:6379)
+            self.redis_client = redis.from_url(
+                settings.redis_url,
                 encoding="utf-8",
                 decode_responses=True,
             )
@@ -36,17 +38,23 @@ class QueryCache:
             self.redis_client = None
             self.enabled = False
 
-    def _generate_cache_key(self, sql: str, data_source_id: Optional[str] = None) -> str:
+    async def _scan_keys(self, pattern: str) -> list[str]:
+        """SCAN instead of KEYS — KEYS blocks Redis on large databases."""
+        if self.redis_client is None:
+            return []
+        return [k async for k in self.redis_client.scan_iter(match=pattern, count=500)]
+
+    def _generate_cache_key(self, sql: str, data_source_id: str | None = None) -> str:
         """Generate a unique cache key for a query."""
         # Create a hash of the SQL query
-        sql_hash = hashlib.md5(sql.encode()).hexdigest()
+        sql_hash = hashlib.sha256(sql.encode()).hexdigest()
 
         # Include data source ID if provided
         if data_source_id:
             return f"query:{data_source_id}:{sql_hash}"
         return f"query:default:{sql_hash}"
 
-    async def get(self, sql: str, data_source_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    async def get(self, sql: str, data_source_id: str | None = None) -> dict[str, Any] | None:
         """Get cached query result if available."""
         if not self.enabled or not self.redis_client:
             return None
@@ -69,9 +77,9 @@ class QueryCache:
     async def set(
         self,
         sql: str,
-        result: Dict[str, Any],
-        data_source_id: Optional[str] = None,
-        ttl: Optional[int] = None
+        result: dict[str, Any],
+        data_source_id: str | None = None,
+        ttl: int | None = None,
     ) -> bool:
         """Cache query result with TTL."""
         if not self.enabled or not self.redis_client:
@@ -82,7 +90,7 @@ class QueryCache:
             cache_ttl = ttl or self.cache_ttl
 
             # Serialize the result
-            cached_data = json.dumps(result)
+            cached_data = json.dumps(result, default=str)
 
             # Store in Redis with TTL
             await self.redis_client.setex(cache_key, cache_ttl, cached_data)
@@ -93,7 +101,7 @@ class QueryCache:
             logger.error(f"[QUERY_CACHE] Error caching result: {e}")
             return False
 
-    async def invalidate(self, sql: str, data_source_id: Optional[str] = None) -> bool:
+    async def invalidate(self, sql: str, data_source_id: str | None = None) -> bool:
         """Invalidate a specific cached query."""
         if not self.enabled or not self.redis_client:
             return False
@@ -115,11 +123,13 @@ class QueryCache:
 
         try:
             pattern = f"query:{data_source_id}:*"
-            keys = await self.redis_client.keys(pattern)
+            keys = await self._scan_keys(pattern)
 
             if keys:
                 await self.redis_client.delete(*keys)
-                logger.info(f"[QUERY_CACHE] Invalidated {len(keys)} cached queries for data source {data_source_id}")
+                logger.info(
+                    f"[QUERY_CACHE] Invalidated {len(keys)} cached queries for data source {data_source_id}"
+                )
                 return True
 
             return False
@@ -127,51 +137,6 @@ class QueryCache:
         except Exception as e:
             logger.error(f"[QUERY_CACHE] Error invalidating data source cache: {e}")
             return False
-
-    async def clear_all(self) -> bool:
-        """Clear all cached query results."""
-        if not self.enabled or not self.redis_client:
-            return False
-
-        try:
-            pattern = "query:*"
-            keys = await self.redis_client.keys(pattern)
-
-            if keys:
-                await self.redis_client.delete(*keys)
-                logger.info(f"[QUERY_CACHE] Cleared {len(keys)} cached queries")
-                return True
-
-            return False
-
-        except Exception as e:
-            logger.error(f"[QUERY_CACHE] Error clearing cache: {e}")
-            return False
-
-    async def get_stats(self) -> Dict[str, Any]:
-        """Get cache statistics."""
-        if not self.enabled or not self.redis_client:
-            return {
-                "enabled": False,
-                "cached_queries": 0,
-            }
-
-        try:
-            pattern = "query:*"
-            keys = await self.redis_client.keys(pattern)
-
-            return {
-                "enabled": True,
-                "cached_queries": len(keys),
-                "ttl_seconds": self.cache_ttl,
-            }
-
-        except Exception as e:
-            logger.error(f"[QUERY_CACHE] Error getting stats: {e}")
-            return {
-                "enabled": False,
-                "error": str(e),
-            }
 
 
 # Global cache instance

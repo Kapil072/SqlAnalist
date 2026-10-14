@@ -3,17 +3,133 @@
 @tailwind utilities;
 
 @layer base {
-  html { scroll-behavior: smooth; }
+  html {
+    scroll-behavior: smooth;
+  }
   body {
-    font-family: 'Inter', system-ui, sans-serif;
+    font-family: var(--font-inter), 'Inter', system-ui, sans-serif;
+    @apply bg-slate-50 text-slate-800;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
-  ::-webkit-scrollbar { width: 5px; height: 5px; }
-  ::-webkit-scrollbar-thumb { background: rgba(14,153,153,0.30); border-radius: 4px; }
-  ::-webkit-scrollbar-track { background: transparent; }
+  ::selection {
+    @apply bg-teal-200 text-slate-900;
+  }
+  :focus-visible {
+    @apply outline-none ring-2 ring-teal-500/60 ring-offset-1;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(100, 116, 139, 0.28);
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(100, 116, 139, 0.45);
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* Shared building blocks — use these instead of repeating long class lists */
+@layer components {
+  .card {
+    @apply bg-white rounded-2xl border border-slate-200 shadow-sm;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-xl px-3.5 py-2 text-sm font-semibold
+      transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-teal-600 text-white shadow-sm hover:bg-teal-700;
+  }
+  .btn-secondary {
+    @apply btn bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:border-slate-300;
+  }
+  .btn-danger {
+    @apply btn bg-red-600 text-white shadow-sm hover:bg-red-700;
+  }
+  .btn-icon {
+    @apply inline-flex items-center justify-center w-9 h-9 rounded-xl text-slate-500
+      hover:text-slate-900 hover:bg-slate-100 transition-colors disabled:opacity-50;
+  }
+  .input {
+    @apply w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900
+      placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5
+      text-[11px] font-medium text-slate-600 whitespace-nowrap;
+  }
+  .label {
+    @apply text-[11px] font-semibold uppercase tracking-wider text-slate-500;
+  }
+  /* Shimmering loading placeholder */
+  .skeleton {
+    background: linear-gradient(90deg, #eef2f6 0%, #e2f4f4 40%, #eef2f6 80%);
+    background-size: 200% 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+/* Join Venn circles slide together, then the shared part fills in */
+@keyframes venn-in-left {
+  from {
+    transform: translateX(-22px);
+    opacity: 0;
+  }
+}
+@keyframes venn-in-right {
+  from {
+    transform: translateX(22px);
+    opacity: 0;
+  }
+}
+@keyframes venn-fade {
+  from {
+    opacity: 0;
+  }
+}
+.venn-left {
+  animation: venn-in-left 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.venn-right {
+  animation: venn-in-right 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.venn-match {
+  animation: venn-fade 0.4s ease 0.3s both;
+}
+.venn-lines {
+  animation: venn-fade 0.3s ease 0.15s both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton,
+  .venn-left,
+  .venn-right,
+  .venn-match,
+  .venn-lines {
+    animation: none;
+  }
 }
 
 @layer utilities {
-  .font-mono { font-family: 'JetBrains Mono', 'Fira Code', Menlo, monospace; }
+  .font-mono {
+    font-family: var(--font-mono), 'JetBrains Mono', 'Fira Code', Menlo, monospace;
+  }
 }

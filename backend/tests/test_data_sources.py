@@ -1,15 +1,16 @@
 """
 Tests for dynamic data source connections and management.
 """
-import pytest
+
 import uuid
+
+import pytest
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.data_source import DataSource
 from app.models.user import User
-from app.core.security import hash_password
 
 
 @pytest.mark.asyncio
@@ -23,8 +24,8 @@ async def test_create_data_source_admin_only(client: AsyncClient, admin_token: s
             "name": "Test SQLite DB",
             "db_type": "sqlite",
             "database_name": "./test.db",
-            "password": "test123"
-        }
+            "password": "test123",
+        },
     )
     assert response.status_code == 201
     data = response.json()
@@ -43,16 +44,16 @@ async def test_create_data_source_non_admin_denied(client: AsyncClient, user_tok
             "name": "Test SQLite DB",
             "db_type": "sqlite",
             "database_name": "./test.db",
-        }
+        },
     )
     assert response.status_code == 403
 
 
 @pytest.mark.asyncio
-async def test_list_data_sources(client: AsyncClient, admin_token: str, db: AsyncSession):
+async def test_list_data_sources(client: AsyncClient, admin_token: str, db_session: AsyncSession):
     """Test listing data sources."""
     # Create a test data source
-    admin_user = await db.execute(select(User).where(User.email == "admin@sqlanalyst.com"))
+    admin_user = await db_session.execute(select(User).where(User.email == "admin@sqlanalyst.com"))
     admin = admin_user.scalar_one()
 
     data_source = DataSource(
@@ -63,14 +64,11 @@ async def test_list_data_sources(client: AsyncClient, admin_token: str, db: Asyn
         encrypted_password="encrypted",
         is_active=True,
     )
-    db.add(data_source)
-    await db.commit()
+    db_session.add(data_source)
+    await db_session.commit()
 
     # List data sources
-    response = await client.get(
-        "/data-sources",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
+    response = await client.get("/data-sources", headers={"Authorization": f"Bearer {admin_token}"})
     assert response.status_code == 200
     data = response.json()
     assert "data_sources" in data
@@ -78,13 +76,16 @@ async def test_list_data_sources(client: AsyncClient, admin_token: str, db: Asyn
 
 
 @pytest.mark.asyncio
-async def test_get_data_source_schema(client: AsyncClient, admin_token: str, db: AsyncSession):
+async def test_get_data_source_schema(
+    client: AsyncClient, admin_token: str, db_session: AsyncSession
+):
     """Test getting schema from a data source."""
     # Create a test SQLite data source
-    admin_user = await db.execute(select(User).where(User.email == "admin@sqlanalyst.com"))
+    admin_user = await db_session.execute(select(User).where(User.email == "admin@sqlanalyst.com"))
     admin = admin_user.scalar_one()
 
     from app.services.connection_manager import ConnectionManager
+
     data_source = DataSource(
         user_id=admin.id,
         name="Test SQLite",
@@ -93,24 +94,22 @@ async def test_get_data_source_schema(client: AsyncClient, admin_token: str, db:
         encrypted_password=ConnectionManager.encrypt_password(""),
         is_active=True,
     )
-    db.add(data_source)
-    await db.commit()
-    await db.refresh(data_source)
+    db_session.add(data_source)
+    await db_session.commit()
+    await db_session.refresh(data_source)
 
     # Get schema
     response = await client.get(
-        f"/data-sources/{data_source.id}/schema",
-        headers={"Authorization": f"Bearer {admin_token}"}
+        f"/data-sources/{data_source.id}/schema", headers={"Authorization": f"Bearer {admin_token}"}
     )
     # Note: This might fail if we can't connect to the actual database
     # but the endpoint structure should be correct
     assert response.status_code in [200, 500]  # 500 if connection fails
 
 
-@pytest.mark.asyncio
-async def test_sql_validation_blocks_dangerous_queries(client: AsyncClient, admin_token: str):
+def test_sql_validation_blocks_dangerous_queries():
     """Test that SQL validation blocks dangerous operations."""
-    from app.sql_safety.validator import validate_sql, SQLValidationError
+    from app.sql_safety.validator import SQLValidationError, validate_sql
 
     # Test DROP TABLE
     with pytest.raises(SQLValidationError):
@@ -130,7 +129,9 @@ async def test_sql_validation_blocks_dangerous_queries(client: AsyncClient, admi
 
     # Test valid SELECT
     try:
-        validated = validate_sql("SELECT * FROM users LIMIT 10", dialect="mysql")
+        validated = validate_sql(
+            "SELECT * FROM customers LIMIT 10", dialect="mysql", allowed_tables={"customers"}
+        )
         assert "SELECT" in validated.upper()
     except SQLValidationError:
         pytest.fail("Valid SELECT query should pass validation")
@@ -156,8 +157,8 @@ async def test_password_encryption():
 @pytest.mark.asyncio
 async def test_connection_url_generation():
     """Test connection URL generation for different database types."""
-    from app.services.connection_manager import ConnectionManager
     from app.models.data_source import DataSource
+    from app.services.connection_manager import ConnectionManager
 
     # Test SQLite
     sqlite_ds = DataSource(
@@ -235,3 +236,21 @@ async def test_query_cache_basic_operations():
         await query_cache.invalidate(test_sql, "test_ds_id")
         cached_after = await query_cache.get(test_sql, "test_ds_id")
         assert cached_after is None
+
+
+@pytest.mark.asyncio
+async def test_delete_data_source(client: AsyncClient, admin_token: str, db_session: AsyncSession):
+    """Admin can delete a data source and it is gone afterwards."""
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    created = await client.post(
+        "/data-sources",
+        headers=headers,
+        json={"name": "To delete", "db_type": "sqlite", "database_name": "./x.db"},
+    )
+    ds_id = created.json()["id"]
+
+    response = await client.delete(f"/data-sources/{ds_id}", headers=headers)
+    assert response.status_code == 204, response.text
+
+    response = await client.get(f"/data-sources/{ds_id}", headers=headers)
+    assert response.status_code == 404

@@ -6,17 +6,21 @@
 # full server restart.
 
 from contextlib import contextmanager
-from sqlalchemy import create_engine, text
+from typing import Any
+
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
+
 from app.utils.logger import logger
 
 _engine: Engine | None = None
 
 
 def _build_engine() -> Engine:
-    from app.config import settings          # re-read every time so .env changes are picked up
+    from app.config import settings  # re-read every time so .env changes are picked up
+
     url = settings.target_db_url
-    kwargs = {"future": True, "pool_pre_ping": True}
+    kwargs: dict[str, Any] = {"future": True, "pool_pre_ping": True}
 
     # SQLite doesn't support connection pooling arguments
     if not url.startswith("sqlite"):
@@ -56,6 +60,7 @@ def reset_engine() -> None:
 # Convenience helpers used by the rest of the codebase
 # ---------------------------------------------------------------------------
 
+
 @contextmanager
 def get_target_connection():
     """Yield a raw DBAPI connection and ensure it is closed."""
@@ -71,6 +76,7 @@ def get_target_connection():
 # It proxies to get_engine() so it always reflects the current engine.
 class _EngineProxy:
     """Thin proxy that forwards attribute access to the live engine."""
+
     def __getattr__(self, name):
         return getattr(get_engine(), name)
 
@@ -79,4 +85,4 @@ class _EngineProxy:
 
 
 engine = _EngineProxy()
-target_engine = engine          # backward-compat alias
+target_engine = engine  # backward-compat alias

@@ -2,25 +2,26 @@
 Safe query executor — runs pre-validated SQL against the target DB.
 Always rolls back the transaction (even on success) for maximum safety.
 """
-import time
-from typing import Any, Dict, List, Optional
-from dataclasses import dataclass
 
-from app.db.connection import get_engine
+import time
+from dataclasses import dataclass
+from typing import Any
+
 from app.config import settings
+from app.db.connection import get_engine
 from app.utils.logger import logger
 
 
 @dataclass
 class QueryResult:
-    columns: List[str]
-    rows: List[List[Any]]
+    columns: list[str]
+    rows: list[list[Any]]
     row_count: int
     timing_ms: int
     truncated: bool = False  # True if row cap was hit
 
 
-def execute_safe_query(sql: str, max_rows: Optional[int] = None) -> QueryResult:
+def execute_safe_query(sql: str, max_rows: int | None = None) -> QueryResult:
     """
     Execute a pre-validated SQL string against the target database.
     - Uses a transaction that is ALWAYS rolled back
@@ -47,10 +48,10 @@ def execute_safe_query(sql: str, max_rows: Optional[int] = None) -> QueryResult:
             except Exception:
                 pass  # Not critical
 
-        cursor.execute(sql)   #EXECUTE QUERY IMP
+        cursor.execute(sql)  # EXECUTE QUERY IMP
 
-        columns: List[str] = []
-        rows: List[List[Any]] = []
+        columns: list[str] = []
+        rows: list[list[Any]] = []
         truncated = False
 
         if cursor.description:
@@ -61,10 +62,12 @@ def execute_safe_query(sql: str, max_rows: Optional[int] = None) -> QueryResult:
                 raw_rows = raw_rows[:cap]
                 truncated = True
 
-            rows = [list(row) for row in raw_rows] #Convert row into List
+            rows = [list(row) for row in raw_rows]  # Convert row into List
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
-        logger.info(f"[EXECUTOR] Query returned {len(rows)} rows in {elapsed_ms}ms (truncated={truncated})")
+        logger.info(
+            f"[EXECUTOR] Query returned {len(rows)} rows in {elapsed_ms}ms (truncated={truncated})"
+        )
 
         return QueryResult(
             columns=columns,

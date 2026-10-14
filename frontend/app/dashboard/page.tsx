@@ -1,14 +1,31 @@
 'use client';
-import {
-  useState, useEffect, useRef, useCallback, useLayoutEffect
-} from 'react';
-import {
-  API, authHeaders, saveChatMessage,
-} from '@/lib/api';
-import { useDash } from './layout';
+import { useState, useEffect, useRef, useCallback, useLayoutEffect, useMemo } from 'react';
+import { API, authFetch, saveChatMessage, DEFAULT_SOURCE_ID, errorText } from '@/lib/api';
+import { useDash } from './context';
 import dynamic from 'next/dynamic';
+import Icon, { IconName } from '@/components/Icon';
+import DataTable, { downloadCsv } from '@/components/DataTable';
+import JoinView from '@/components/JoinVenn';
+import { parseJoins } from '@/lib/sqlJoins';
+import {
+  AnimatePresence,
+  LayoutGroup,
+  motion,
+  Modal,
+  Skeleton,
+  TypingDots,
+  collapse,
+  ease,
+  fadeUp,
+  press,
+  spring,
+  stagger,
+} from '@/components/motion';
 
-const ChartComponent = dynamic(() => import('@/components/ChartBlock'), { ssr: false });
+const ChartComponent = dynamic(() => import('@/components/ChartBlock'), {
+  ssr: false,
+  loading: () => <Skeleton className="h-64 rounded-xl" />,
+});
 
 // ── Types ────────────────────────────────────────────────────
 interface MetaPayload {
@@ -21,6 +38,17 @@ interface MetaPayload {
   engine_used: string;
   session_id: string;
   source?: string;
+}
+
+/** A change (INSERT/UPDATE/DELETE/DDL) an admin asked for — runs only after they confirm. */
+interface PendingChange {
+  sql: string;
+  kind: string;
+  full_table: boolean;
+  database: string;
+  data_source_id?: string | null;
+  state: 'waiting' | 'running' | 'done' | 'cancelled' | 'failed';
+  result?: string;
 }
 
 interface FileResult {
@@ -38,6 +66,7 @@ interface Message {
   question?: string;
   text?: string;
   meta?: MetaPayload;
+  change?: PendingChange;
   fileResult?: FileResult;
   streaming?: boolean;
   error?: string;
@@ -51,21 +80,20 @@ const SAMPLES = [
 ];
 
 export default function ChatPage() {
-  const { setInjectPrompt } = useDash();
-  const [messages,       setMessages]       = useState<Message[]>([]);
-  const [input,          setInput]          = useState('');
-  const [loading,        setLoading]        = useState(false);
-  const [fileModal,      setFileModal]      = useState(false);
-  const [uploading,      setUploading]      = useState(false);
-  const [activeFile,     setActiveFile]     = useState<FileResult | null>(null);
+  const { setInjectPrompt, sourceId, source, suggestions } = useDash();
+  const samples = suggestions.length ? suggestions.slice(0, 4) : SAMPLES;
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [fileModal, setFileModal] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [activeFile, setActiveFile] = useState<FileResult | null>(null);
 
-  const scrollRef    = useRef<HTMLDivElement>(null);
-  const inputRef     = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const sessionRef   = useRef<string | null>(
-    typeof window !== 'undefined'
-      ? sessionStorage.getItem('sqlanalyst_session_id')
-      : null
+  const sessionRef = useRef<string | null>(
+    typeof window !== 'undefined' ? sessionStorage.getItem('sqlanalyst_session_id') : null,
   );
 
   // ── Fix 1: stable inject registration — no dependency loop ──
@@ -108,19 +136,21 @@ export default function ChatPage() {
     onToken: (t: string) => void,
     onDone: () => void,
     onError: (e: string) => void,
+    onConfirm?: (c: Omit<PendingChange, 'state'>) => void,
   ) {
-    const resp = await fetch(url, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body:    JSON.stringify(body),
+    // authFetch refreshes an expired access token and retries once on 401
+    const resp = await authFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ detail: 'Request failed' }));
-      throw new Error(err.detail || 'Request failed');
+      throw new Error(errorText(err, 'Request failed'));
     }
-    const reader  = resp.body!.getReader();
+    const reader = resp.body!.getReader();
     const decoder = new TextDecoder();
-    let   buffer  = '';
+    let buffer = '';
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -129,118 +159,147 @@ export default function ChatPage() {
       buffer = frames.pop() ?? '';
       for (const frame of frames) {
         if (!frame.trim()) continue;
-        let eventName = 'message', dataStr = '';
+        let eventName = 'message',
+          dataStr = '';
         for (const line of frame.split('\n')) {
           if (line.startsWith('event:')) eventName = line.slice(6).trim();
           else if (line.startsWith('data:')) dataStr = line.slice(5).trim();
         }
         let payload: Record<string, unknown>;
-        try { payload = JSON.parse(dataStr); } catch { continue; }
-        if (eventName === 'meta')  onMeta(payload as unknown as MetaPayload);
+        try {
+          payload = JSON.parse(dataStr);
+        } catch {
+          continue;
+        }
+        if (eventName === 'meta') onMeta(payload as unknown as MetaPayload);
         if (eventName === 'token') onToken((payload.token as string) || '');
-        if (eventName === 'done')  onDone();
+        if (eventName === 'done') onDone();
         if (eventName === 'error') onError((payload.detail as string) || 'Unknown error');
+        if (eventName === 'confirm' && onConfirm)
+          onConfirm(payload as unknown as Omit<PendingChange, 'state'>);
       }
     }
   }
 
   // ── Send question ─────────────────────────────────────────
-  const sendQuestion = useCallback(async (question: string) => {
-    if (!question.trim() || loading) return;
-    setInput('');
-    setLoading(true);
+  const sendQuestion = useCallback(
+    async (question: string) => {
+      if (!question.trim() || loading) return;
+      setInput('');
+      setLoading(true);
 
-    const userMsg: Message = { id: Date.now() + 'u', role: 'user', question };
-    const aId = Date.now() + 'a';
-    setMessages(prev => [...prev, userMsg,
-      { id: aId, role: 'assistant', streaming: true, text: '' }
-    ]);
+      const userMsg: Message = { id: Date.now() + 'u', role: 'user', question };
+      const aId = Date.now() + 'a';
+      setMessages(prev => [
+        ...prev,
+        userMsg,
+        { id: aId, role: 'assistant', streaming: true, text: '' },
+      ]);
 
-    let finalMeta: MetaPayload | null = null;
-    let finalText = '';
+      let finalMeta: MetaPayload | null = null;
+      let finalText = '';
 
-    try {
-      // ── Fix 2: route to file endpoint when file is active ──
-      const isFileMode = !!activeFile;
-      const url  = isFileMode ? `${API}/api/ask-file` : `${API}/ask/stream`;
-      const body = isFileMode
-        ? { question, file_session_id: activeFile!.file_session_id }
-        : { question, session_id: sessionRef.current || undefined };
+      try {
+        // ── Fix 2: route to file endpoint when file is active ──
+        const isFileMode = !!activeFile;
+        const url = isFileMode ? `${API}/api/ask-file` : `${API}/ask/stream`;
+        const body = isFileMode
+          ? { question, file_session_id: activeFile!.file_session_id }
+          : {
+              question,
+              session_id: sessionRef.current || undefined,
+              // Ask the database chosen in the sidebar (omitted = default database)
+              data_source_id: sourceId !== DEFAULT_SOURCE_ID ? sourceId : undefined,
+            };
 
-      await streamSSE(
-        url, body,
-        (meta) => {
-          finalMeta = meta;
-          if (!isFileMode && meta.session_id) {
-            sessionRef.current = meta.session_id;
-            sessionStorage.setItem('sqlanalyst_session_id', meta.session_id);
-          }
-          setMessages(prev => prev.map(m =>
-            m.id === aId ? { ...m, meta } : m
-          ));
-        },
-        (token) => {
-          finalText += token;
-          setMessages(prev => prev.map(m =>
-            m.id === aId ? { ...m, text: (m.text || '') + token } : m
-          ));
-        },
-        () => {
-          setMessages(prev => prev.map(m =>
-            m.id === aId ? { ...m, streaming: false } : m
-          ));
-        },
-        (errMsg) => { throw new Error(errMsg); },
-      );
+        await streamSSE(
+          url,
+          body,
+          meta => {
+            finalMeta = meta;
+            if (!isFileMode && meta.session_id) {
+              sessionRef.current = meta.session_id;
+              sessionStorage.setItem('sqlanalyst_session_id', meta.session_id);
+            }
+            setMessages(prev => prev.map(m => (m.id === aId ? { ...m, meta } : m)));
+          },
+          token => {
+            finalText += token;
+            setMessages(prev =>
+              prev.map(m => (m.id === aId ? { ...m, text: (m.text || '') + token } : m)),
+            );
+          },
+          () => {
+            setMessages(prev => prev.map(m => (m.id === aId ? { ...m, streaming: false } : m)));
+          },
+          errMsg => {
+            throw new Error(errMsg);
+          },
+          change => {
+            setMessages(prev =>
+              prev.map(m => (m.id === aId ? { ...m, change: { ...change, state: 'waiting' } } : m)),
+            );
+          },
+        );
 
-      if (finalMeta) {
-        saveChatMessage({
-          question,
-          sql_query:   finalMeta.sql_query,
-          explanation: finalText,
-          engine_used: finalMeta.engine_used,
-          session_id:  sessionRef.current || undefined,
-        }).catch(() => {});
+        const metaToSave = finalMeta as MetaPayload | null;
+        if (metaToSave) {
+          saveChatMessage({
+            question,
+            sql_query: metaToSave.sql_query,
+            explanation: finalText,
+            engine_used: metaToSave.engine_used,
+            session_id: sessionRef.current || undefined,
+          })
+            .then(() => window.dispatchEvent(new Event('history-changed')))
+            .catch(() => {});
+        }
+      } catch (err) {
+        setMessages(prev =>
+          prev.map(m =>
+            m.id === aId ? { ...m, streaming: false, error: (err as Error).message } : m,
+          ),
+        );
+      } finally {
+        setLoading(false);
       }
-
-    } catch (err) {
-      setMessages(prev => prev.map(m =>
-        m.id === aId ? { ...m, streaming: false, error: (err as Error).message } : m
-      ));
-    } finally {
-      setLoading(false);
-    }
-  }, [loading, activeFile]);
+    },
+    [loading, activeFile, sourceId],
+  );
 
   // ── File upload ───────────────────────────────────────────
   async function handleFileUpload(file: File) {
     setFileModal(false);
     setUploading(true);
     const fileId = Date.now() + 'f';
-    setMessages(prev => [...prev, {
-      id: fileId, role: 'file', question: `Uploading ${file.name}…`,
-    }]);
+    setMessages(prev => [
+      ...prev,
+      {
+        id: fileId,
+        role: 'file',
+        question: `Uploading ${file.name}…`,
+      },
+    ]);
 
     try {
       const form = new FormData();
       form.append('file', file);
-      const res  = await fetch(`${API}/api/analyze-file`, {
-        method:  'POST',
-        headers: authHeaders(),
-        body:    form,
+      const res = await authFetch(`${API}/api/analyze-file`, {
+        method: 'POST',
+        body: form,
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Upload failed');
+      if (!res.ok) throw new Error(errorText(data, 'Upload failed'));
 
       const result: FileResult = data;
       setActiveFile(result);
-      setMessages(prev => prev.map(m =>
-        m.id === fileId ? { ...m, question: file.name, fileResult: result } : m
-      ));
+      setMessages(prev =>
+        prev.map(m => (m.id === fileId ? { ...m, question: file.name, fileResult: result } : m)),
+      );
     } catch (err) {
-      setMessages(prev => prev.map(m =>
-        m.id === fileId ? { ...m, error: (err as Error).message } : m
-      ));
+      setMessages(prev =>
+        prev.map(m => (m.id === fileId ? { ...m, error: (err as Error).message } : m)),
+      );
     } finally {
       setUploading(false);
     }
@@ -252,297 +311,228 @@ export default function ChatPage() {
     if (file) handleFileUpload(file);
   }
 
+  // ── Run (or cancel) a change the admin asked for in the chat ──
+  async function runChange(msgId: string, change: PendingChange) {
+    const setChange = (patch: Partial<PendingChange>) =>
+      setMessages(prev =>
+        prev.map(m =>
+          m.id === msgId && m.change ? { ...m, change: { ...m.change, ...patch } } : m,
+        ),
+      );
+    if (
+      change.full_table &&
+      !window.confirm(
+        `This ${change.kind.toUpperCase()} affects every row of the table or removes it on "${change.database}".\n\n${change.sql}\n\nRun it anyway?`,
+      )
+    )
+      return;
+    setChange({ state: 'running' });
+    try {
+      const res = await authFetch('/admin/sql/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sql: change.sql,
+          data_source_id: change.data_source_id || undefined,
+          confirm_full_table: change.full_table,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(errorText(data, 'The change failed'));
+      const rows =
+        data.rows_affected === null || data.rows_affected === undefined
+          ? 'done'
+          : `${data.rows_affected} row(s) affected`;
+      setChange({
+        state: 'done',
+        result:
+          `${String(data.kind).toUpperCase()} on ${data.database}: ${rows} in ${data.timing_ms}ms.` +
+          (data.schema_refreshed ? ' Table list refreshed.' : ''),
+      });
+      if (data.schema_refreshed) window.dispatchEvent(new Event('schema-changed'));
+    } catch (err) {
+      setChange({ state: 'failed', result: (err as Error).message });
+    }
+  }
+
+  function cancelChange(msgId: string) {
+    setMessages(prev =>
+      prev.map(m =>
+        m.id === msgId && m.change
+          ? {
+              ...m,
+              change: {
+                ...m.change,
+                state: 'cancelled',
+                result: 'Cancelled — nothing was changed.',
+              },
+            }
+          : m,
+      ),
+    );
+  }
+
+  // Grow the question box with its content (up to ~6 lines)
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [input]);
+
   const showWelcome = messages.length === 0;
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-
       {/* ── Active file banner ── */}
-      {activeFile && (
-        <div className="flex items-center justify-between px-4 py-2
-                        bg-teal-600 text-white text-xs font-semibold flex-shrink-0">
-          <div className="flex items-center gap-2">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" strokeWidth="2">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-              <polyline points="14 2 14 8 20 8"/>
-            </svg>
-            Querying: <span className="font-bold">{activeFile.filename}</span>
-            <span className="opacity-75">
-              ({activeFile.rows.toLocaleString()} rows, {activeFile.columns.length} cols)
-            </span>
-          </div>
-          <button
-            onClick={() => setActiveFile(null)}
-            className="flex items-center gap-1 px-2 py-0.5 rounded-lg
-                       bg-white/20 hover:bg-white/30 transition-colors">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" strokeWidth="2">
-              <line x1="18" y1="6" x2="6" y2="18"/>
-              <line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-            Back to database
-          </button>
-        </div>
-      )}
-
-      {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-5 space-y-4">
-
-        {showWelcome && (
-          <div className="max-w-2xl mx-auto text-center pt-8 animate-fade-in">
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full
-                            bg-teal-100 border border-teal-200 text-teal-700
-                            text-xs font-semibold mb-4">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-                   stroke="currentColor" strokeWidth="2.5">
-                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-              </svg>
-              Real-Time Text-to-SQL Engine
+      <AnimatePresence initial={false}>
+        {activeFile && (
+          <motion.div {...collapse} className="flex-shrink-0 overflow-hidden">
+            <div className="flex items-center gap-3 px-4 py-2 bg-gradient-to-r from-teal-700 to-teal-600 text-white text-sm">
+              <Icon name="file" size={15} />
+              <p className="min-w-0 truncate">
+                Asking about <span className="font-semibold">{activeFile.filename}</span>
+                <span className="opacity-75">
+                  {' '}
+                  · {activeFile.rows.toLocaleString()} rows · {activeFile.columns.length} columns
+                </span>
+              </p>
+              <button
+                onClick={() => setActiveFile(null)}
+                className="ml-auto flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-xs font-medium flex-shrink-0"
+              >
+                <Icon name="x" size={12} /> Back to database
+              </button>
             </div>
-            <h1 className="font-heading text-3xl font-extrabold text-teal-800
-                           tracking-tight mb-3">
-              Ask your database anything.
-            </h1>
-            <p className="text-teal-600 text-sm leading-relaxed mb-8 max-w-lg mx-auto">
-              Type a business question and SQLAnalyst generates safe SQL,
-              queries your live database and renders charts instantly.
-              Or upload a CSV / Excel file — questions will query the file directly.
-            </p>
-            <div className="grid grid-cols-2 gap-3 text-left">
-              {SAMPLES.map(s => (
-                <button key={s} onClick={() => sendQuestion(s)}
-                  className="flex items-start gap-3 p-4 bg-white/80 rounded-xl
-                             border border-teal-100 hover:border-teal-300
-                             hover:bg-white shadow-sm hover:shadow-teal
-                             transition-all duration-200 group">
-                  <div className="w-7 h-7 rounded-lg bg-teal-50 border border-teal-200
-                                  flex items-center justify-center flex-shrink-0">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
-                         stroke="currentColor" strokeWidth="2" className="text-teal-500">
-                      <circle cx="11" cy="11" r="8"/>
-                      <line x1="21" y1="21" x2="16.65" y2="16.65"/>
-                    </svg>
-                  </div>
-                  <span className="text-xs font-medium text-teal-700
-                                   group-hover:text-teal-900 transition-colors leading-relaxed">
-                    {s}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
+          </motion.div>
         )}
+      </AnimatePresence>
 
-        {messages.map(msg => (
-          <div key={msg.id} className="max-w-3xl mx-auto w-full">
+      {/* ── Conversation ── */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+        <div className="max-w-4xl mx-auto px-3 sm:px-6 py-6 space-y-6">
+          {showWelcome && (
+            <motion.div
+              className="pt-6 sm:pt-12"
+              variants={stagger(0.07)}
+              initial="hidden"
+              animate="show"
+            >
+              <motion.div variants={fadeUp} className="relative w-12 h-12">
+                <motion.span
+                  className="absolute inset-0 rounded-2xl bg-teal-400/30"
+                  animate={{ scale: [1, 1.35], opacity: [0.6, 0] }}
+                  transition={{ duration: 2, repeat: Infinity, ease: 'easeOut' }}
+                />
+                <motion.div
+                  className="relative w-12 h-12 rounded-2xl bg-gradient-to-br from-teal-500 to-teal-700 text-white flex items-center justify-center shadow-teal"
+                  animate={{ rotate: [0, -6, 6, 0] }}
+                  transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut', repeatDelay: 1 }}
+                >
+                  <Icon name="sparkles" size={22} />
+                </motion.div>
+              </motion.div>
+              <motion.h1
+                variants={fadeUp}
+                className="mt-5 font-heading text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight"
+              >
+                What would you like to know?
+              </motion.h1>
+              <motion.p variants={fadeUp} className="mt-2 text-slate-500 max-w-xl">
+                Ask in plain English. SQLAnalyst writes safe, read-only SQL, runs it on{' '}
+                {source ? (
+                  <span className="font-medium text-slate-800">{source.name}</span>
+                ) : (
+                  'your database'
+                )}{' '}
+                and shows the answer as a chart and a table.
+              </motion.p>
 
-            {msg.role === 'user' && (
-              <div className="flex justify-end mb-1">
-                <div className="max-w-[72%] bg-gradient-to-br from-teal-500 to-teal-600
-                                text-white px-4 py-2.5 rounded-2xl rounded-br-sm
-                                text-sm font-medium shadow-teal leading-relaxed">
-                  {msg.question}
-                </div>
-              </div>
-            )}
-
-            {msg.role === 'file' && (
-              <div className="bg-white/90 rounded-2xl border border-teal-100
-                              border-t-2 border-t-teal-300 shadow-teal p-4 space-y-3">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-lg bg-teal-50 border border-teal-200
-                                  flex items-center justify-center">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
-                         stroke="currentColor" strokeWidth="2" className="text-teal-600">
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                      <polyline points="14 2 14 8 20 8"/>
-                    </svg>
-                  </div>
-                  <span className="font-semibold text-sm text-teal-800">
-                    {msg.fileResult ? msg.fileResult.filename : msg.question}
-                  </span>
-                  {!msg.fileResult && !msg.error && (
-                    <div className="w-4 h-4 border-2 border-teal-400 border-t-transparent
-                                    rounded-full animate-spin ml-auto" />
-                  )}
-                </div>
-                {msg.error && (
-                  <p className="text-red-600 text-sm bg-red-50 rounded-lg px-3 py-2">
-                    {msg.error}
-                  </p>
-                )}
-                {msg.fileResult && (
-                  <>
-                    <div className="flex flex-wrap gap-2 text-xs">
-                      <span className="px-2 py-1 rounded-lg bg-teal-50 border border-teal-100
-                                       text-teal-700 font-semibold">
-                        {msg.fileResult.rows.toLocaleString()} rows
-                      </span>
-                      <span className="px-2 py-1 rounded-lg bg-teal-50 border border-teal-100
-                                       text-teal-700 font-semibold">
-                        {msg.fileResult.columns.length} columns
-                      </span>
-                      <span className="px-2 py-1 rounded-lg bg-emerald-50 border border-emerald-100
-                                       text-emerald-700 font-semibold">
-                        Active — questions now query this file
-                      </span>
-                    </div>
-                    <p className="text-sm text-teal-700 leading-relaxed">
-                      {msg.fileResult.analysis}
-                    </p>
-                    <div className="overflow-x-auto rounded-xl border border-teal-100">
-                      <table className="w-full text-xs border-collapse">
-                        <thead>
-                          <tr className="bg-teal-50">
-                            {msg.fileResult.columns.slice(0, 6).map(c => (
-                              <th key={c} className="px-3 py-2 text-left font-bold text-teal-600
-                                                     uppercase tracking-wider border-b border-teal-100
-                                                     text-[10px]">
-                                {c}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {msg.fileResult.preview.slice(0, 5).map((row, i) => (
-                            <tr key={i} className="border-b border-teal-50 hover:bg-teal-50/50">
-                              {msg.fileResult!.columns.slice(0, 6).map(c => (
-                                <td key={c} className="px-3 py-2 text-teal-800">
-                                  {String(row[c] ?? '')}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-
-            {msg.role === 'assistant' && (
-              <div className="bg-white/90 rounded-2xl border border-teal-100
-                              border-t-2 border-t-teal-200 shadow-teal p-4 space-y-3
-                              animate-fade-in">
-                <div className="flex items-center justify-between pb-2 border-b border-teal-50">
-                  <div className="flex items-center gap-2">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
-                         stroke="currentColor" strokeWidth="2" className="text-teal-500">
-                      <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83
-                               M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-                    </svg>
-                    <span className="font-heading font-bold text-sm text-teal-800">
-                      SQLAnalyst
+              <motion.p variants={fadeUp} className="label mt-8 mb-2">
+                Try one of these
+              </motion.p>
+              <motion.div variants={stagger(0.06)} className="grid sm:grid-cols-2 gap-2.5">
+                {samples.map(s => (
+                  <motion.button
+                    key={s}
+                    variants={fadeUp}
+                    {...press}
+                    onClick={() => sendQuestion(s)}
+                    className="card flex items-start gap-3 p-3.5 text-left hover:border-teal-300 hover:shadow-teal transition-[border-color,box-shadow] group"
+                  >
+                    <span className="mt-0.5 w-6 h-6 -ml-0.5 rounded-lg bg-teal-50 text-teal-600 flex items-center justify-center flex-shrink-0 group-hover:bg-teal-600 group-hover:text-white transition-colors">
+                      <Icon name="search" size={13} />
                     </span>
-                    {msg.meta?.source && (
-                      <span className="text-[11px] px-2 py-0.5 rounded-full
-                                       bg-teal-100 text-teal-600 border border-teal-200">
-                        {msg.meta.source}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    {msg.streaming && (
-                      <span className="text-[11px] px-2 py-0.5 rounded-full
-                                       bg-teal-100 text-teal-600 font-semibold
-                                       animate-pulse border border-teal-200">
-                        Generating…
-                      </span>
-                    )}
-                    {!msg.streaming && msg.meta && (
-                      <>
-                        <span className="text-[11px] px-2 py-0.5 rounded-full
-                                         bg-teal-50 border border-teal-100 text-teal-500">
-                          {msg.meta.timing_ms}ms
-                        </span>
-                        <span className="text-[11px] px-2 py-0.5 rounded-full
-                                         bg-teal-50 border border-teal-100 text-teal-500">
-                          {msg.meta.row_count} rows
-                        </span>
-                        <span className="text-[11px] px-2 py-0.5 rounded-full
-                                         bg-teal-50 border border-teal-200 text-teal-600 font-semibold">
-                          {msg.meta.engine_used === 'file-sqlite' ? 'File' : 'Safe'}
-                        </span>
-                      </>
-                    )}
-                  </div>
+                    <span className="text-sm text-slate-700 group-hover:text-slate-900">{s}</span>
+                  </motion.button>
+                ))}
+              </motion.div>
+
+              <motion.button
+                variants={fadeUp}
+                whileHover={{ x: 3 }}
+                onClick={() => setFileModal(true)}
+                className="mt-4 inline-flex items-center gap-2 text-sm font-medium text-teal-700 hover:text-teal-900"
+              >
+                <Icon name="fileUp" size={15} /> Or upload a CSV / Excel file and ask about it
+              </motion.button>
+            </motion.div>
+          )}
+
+          {messages.map(msg => (
+            <div key={msg.id}>
+              {msg.role === 'user' && (
+                <div className="flex justify-end">
+                  <motion.div
+                    initial={{ opacity: 0, y: 12, scale: 0.96 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    transition={spring}
+                    style={{ transformOrigin: 'bottom right' }}
+                    className="max-w-[85%] sm:max-w-[75%] bg-gradient-to-br from-teal-500 to-teal-700 text-white px-4 py-2.5 rounded-2xl rounded-br-md text-[15px] leading-relaxed shadow-teal whitespace-pre-wrap"
+                  >
+                    {msg.question}
+                  </motion.div>
                 </div>
+              )}
 
-                {msg.error && (
-                  <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3
-                                  text-sm text-red-700">
-                    {msg.error}
-                  </div>
-                )}
+              {msg.role === 'file' && <FileCard msg={msg} />}
 
-                {msg.meta?.sql_query && <SqlBlock sql={msg.meta.sql_query} />}
-
-                {msg.text && (
-                  <p className="text-sm text-teal-800 leading-relaxed">{msg.text}</p>
-                )}
-
-                {msg.meta?.chart && msg.meta.columns.length > 0 && (
-                  <ChartComponent
-                    chart={msg.meta.chart}
-                    columns={msg.meta.columns}
-                    rows={msg.meta.rows}
-                  />
-                )}
-
-                {msg.meta?.columns && msg.meta.columns.length > 0 && (
-                  <DataTable columns={msg.meta.columns} rows={msg.meta.rows} />
-                )}
-              </div>
-            )}
-          </div>
-        ))}
+              {msg.role === 'assistant' && (
+                <AnswerCard
+                  msg={msg}
+                  onRunChange={() => runChange(msg.id, msg.change!)}
+                  onCancelChange={() => cancelChange(msg.id)}
+                />
+              )}
+            </div>
+          ))}
+        </div>
       </div>
 
-      {/* Input bar */}
-      <div className="px-4 pb-4 pt-2 flex-shrink-0">
-        <div className="max-w-3xl mx-auto">
-          {/* File mode hint */}
-          {activeFile && (
-            <p className="text-[11px] text-teal-500 text-center mb-1.5 font-medium">
-              Asking about <span className="font-bold text-teal-700">{activeFile.filename}</span>
-              {' '}— click the banner above to switch back to database
-            </p>
-          )}
-          <div className={`flex items-center bg-white/90 backdrop-blur-sm rounded-2xl
-                           border-2 transition-all duration-200 shadow-teal
-                           ${activeFile
-                             ? 'border-teal-400'
-                             : loading
-                               ? 'border-teal-200'
-                               : 'border-teal-200 focus-within:border-teal-500'}`}>
-
+      {/* ── Question box ── */}
+      <div className="flex-shrink-0 px-3 sm:px-6 pb-3 sm:pb-4 pt-2 bg-gradient-to-t from-slate-50 via-slate-50">
+        <div className="max-w-4xl mx-auto">
+          <div
+            className={`flex items-end gap-2 bg-white rounded-2xl border shadow-sm p-2 transition-colors
+              ${activeFile ? 'border-teal-400' : 'border-slate-200 focus-within:border-teal-500 focus-within:ring-4 focus-within:ring-teal-500/10'}`}
+          >
             <button
               onClick={() => setFileModal(true)}
               disabled={uploading}
-              title="Upload CSV or Excel file to query"
-              className={`ml-3 w-8 h-8 flex items-center justify-center rounded-xl
-                         border text-sm font-bold
-                         disabled:opacity-50 transition-all duration-150 flex-shrink-0
-                         ${activeFile
-                           ? 'bg-teal-500 border-teal-500 text-white hover:bg-teal-600'
-                           : 'bg-teal-50 border-teal-200 text-teal-500 hover:bg-teal-100 hover:text-teal-700'}`}>
-              {uploading
-                ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                : <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                       stroke="currentColor" strokeWidth="2">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                    <polyline points="14 2 14 8 20 8"/>
-                    <line x1="12" y1="12" x2="12" y2="18"/>
-                    <line x1="9" y1="15" x2="15" y2="15"/>
-                  </svg>
-              }
+              title="Upload a CSV or Excel file to ask about"
+              aria-label="Upload a file"
+              className={`btn-icon flex-shrink-0 ${activeFile ? 'text-teal-700 bg-teal-50' : ''}`}
+            >
+              {uploading ? (
+                <span className="w-4 h-4 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <Icon name="paperclip" size={18} />
+              )}
             </button>
 
-            <input
+            <textarea
               ref={inputRef}
-              type="text"
+              rows={1}
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => {
@@ -552,176 +542,529 @@ export default function ChatPage() {
                 }
               }}
               disabled={loading}
-              placeholder={activeFile
-                ? `Ask about ${activeFile.filename}…`
-                : 'Ask about your data — e.g. top 10 customers by revenue…'
+              aria-label="Your question"
+              placeholder={
+                activeFile
+                  ? `Ask about ${activeFile.filename}…`
+                  : `Ask about ${source?.name ?? 'your data'}…  e.g. top 10 customers by revenue`
               }
-              className="flex-1 bg-transparent px-3 py-3 text-sm text-teal-900
-                         placeholder-teal-300 outline-none disabled:opacity-60" />
+              className="flex-1 resize-none bg-transparent px-1 py-2 text-[15px] leading-6 text-slate-900
+                         placeholder-slate-400 outline-none disabled:opacity-60 max-h-40"
+            />
 
-            <button
+            <motion.button
               onClick={() => sendQuestion(input)}
               disabled={loading || !input.trim()}
-              className="mr-2 flex items-center gap-2 px-4 py-2 rounded-xl
-                         bg-gradient-to-r from-teal-500 to-teal-600 text-white
-                         text-sm font-semibold shadow-teal
-                         hover:from-teal-600 hover:to-teal-700
-                         disabled:opacity-40 disabled:cursor-not-allowed
-                         transition-all duration-200 hover:-translate-y-0.5 flex-shrink-0">
-              {loading
-                ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                : <>
-                    <span>Ask AI</span>
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
-                         stroke="currentColor" strokeWidth="2.5">
-                      <line x1="22" y1="2" x2="11" y2="13"/>
-                      <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-                    </svg>
-                  </>
-              }
-            </button>
+              aria-label="Send"
+              whileTap={{ scale: 0.94 }}
+              className="btn-primary h-9 px-3 sm:px-4 flex-shrink-0 min-w-[44px]"
+            >
+              <AnimatePresence mode="wait" initial={false}>
+                {loading ? (
+                  <motion.span
+                    key="busy"
+                    initial={{ opacity: 0, scale: 0.6 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.6 }}
+                    className="flex"
+                  >
+                    <TypingDots className="bg-white" />
+                  </motion.span>
+                ) : (
+                  <motion.span
+                    key="idle"
+                    initial={{ opacity: 0, x: -6 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 8 }}
+                    className="flex items-center gap-1.5"
+                  >
+                    <span className="hidden sm:inline">Ask</span>
+                    <Icon name="send" size={14} />
+                  </motion.span>
+                )}
+              </AnimatePresence>
+            </motion.button>
           </div>
+          <p className="hidden sm:block text-center text-[11px] text-slate-400 mt-1.5">
+            Enter to send · Shift + Enter for a new line · queries are read-only and checked before
+            they run
+          </p>
         </div>
       </div>
 
-      {/* File upload modal */}
-      {fileModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4
-                        bg-black/40 backdrop-blur-sm animate-fade-in"
-             onClick={e => { if (e.target === e.currentTarget) setFileModal(false); }}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4"
-               onDragOver={e => e.preventDefault()}
-               onDrop={handleFileDrop}>
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="font-heading font-bold text-lg text-teal-800">Upload a File</h2>
-                <p className="text-xs text-teal-500 mt-0.5">
-                  After upload, all questions will query this file instead of your database
-                </p>
+      {/* ── File upload dialog ── */}
+      <AnimatePresence>
+        {fileModal && (
+          <Modal
+            onClose={() => setFileModal(false)}
+            labelledBy="upload-title"
+            className="card shadow-xl w-full max-w-md p-6"
+          >
+            <div onDragOver={e => e.preventDefault()} onDrop={handleFileDrop}>
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 id="upload-title" className="font-semibold text-lg text-slate-900">
+                    Upload a file
+                  </h2>
+                  <p className="text-sm text-slate-500 mt-0.5">
+                    Your next questions will be answered from this file.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setFileModal(false)}
+                  aria-label="Close"
+                  className="btn-icon w-8 h-8 -mr-2 -mt-1"
+                >
+                  <Icon name="x" size={16} />
+                </button>
               </div>
-              <button onClick={() => setFileModal(false)}
-                className="w-8 h-8 flex items-center justify-center rounded-lg
-                           text-teal-400 hover:text-teal-700 hover:bg-teal-50 transition-colors">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" strokeWidth="2">
-                  <line x1="18" y1="6" x2="6" y2="18"/>
-                  <line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
-              </button>
-            </div>
 
-            <div onClick={() => fileInputRef.current?.click()}
-              className="border-2 border-dashed border-teal-200 rounded-2xl p-8 text-center
-                         cursor-pointer hover:border-teal-400 hover:bg-teal-50/50
-                         transition-all duration-200 group">
-              <div className="w-12 h-12 rounded-xl bg-teal-50 border border-teal-200
-                              flex items-center justify-center mx-auto mb-3
-                              group-hover:bg-teal-100 transition-colors">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" strokeWidth="1.5" className="text-teal-500">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                  <polyline points="14 2 14 8 20 8"/>
-                  <line x1="12" y1="12" x2="12" y2="18"/>
-                  <line x1="9" y1="15" x2="15" y2="15"/>
-                </svg>
+              <motion.button
+                whileHover={{ scale: 1.01 }}
+                whileTap={{ scale: 0.99 }}
+                onClick={() => fileInputRef.current?.click()}
+                className="mt-5 w-full border-2 border-dashed border-slate-200 rounded-2xl p-8 text-center
+                         hover:border-teal-400 hover:bg-teal-50/40 transition-colors group"
+              >
+                <motion.span
+                  animate={{ y: [0, -4, 0] }}
+                  transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
+                  className="w-12 h-12 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center mx-auto mb-3 group-hover:bg-teal-100"
+                >
+                  <Icon name="fileUp" size={22} />
+                </motion.span>
+                <span className="block font-medium text-slate-800 text-sm">
+                  Click to choose a file, or drop it here
+                </span>
+                <span className="block text-slate-400 text-xs mt-1">
+                  CSV, XLSX or XLS · up to 10 MB
+                </span>
+              </motion.button>
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,.xlsx,.xls"
+                className="hidden"
+                onChange={e => {
+                  const f = e.target.files?.[0];
+                  if (f) handleFileUpload(f);
+                  e.target.value = '';
+                }}
+              />
+
+              <div className="flex justify-end gap-2 mt-5">
+                <button onClick={() => setFileModal(false)} className="btn-secondary">
+                  Cancel
+                </button>
+                <button onClick={() => fileInputRef.current?.click()} className="btn-primary">
+                  Choose file
+                </button>
               </div>
-              <p className="font-semibold text-teal-700 text-sm mb-1">
-                Click to select or drag and drop
-              </p>
-              <p className="text-teal-400 text-xs">
-                CSV, Excel (.xlsx, .xls) — max 10MB
-              </p>
             </div>
+          </Modal>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
 
-            <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls"
-              className="hidden"
-              onChange={e => {
-                const f = e.target.files?.[0];
-                if (f) handleFileUpload(f);
-                e.target.value = '';
-              }} />
+// ─────────────────────────────────────────────────────────────
+// Answer card: explanation first, then Chart / Table / SQL tabs
+// ─────────────────────────────────────────────────────────────
+type View = 'chart' | 'table' | 'joins' | 'sql';
 
-            <div className="flex gap-2">
-              <button onClick={() => fileInputRef.current?.click()}
-                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-teal-500
-                           to-teal-600 text-white text-sm font-semibold
-                           hover:from-teal-600 hover:to-teal-700 transition-all">
-                Browse Files
-              </button>
-              <button onClick={() => setFileModal(false)}
-                className="px-4 py-2.5 rounded-xl border border-teal-200 text-teal-600
-                           text-sm font-semibold hover:bg-teal-50 transition-colors">
-                Cancel
-              </button>
-            </div>
-          </div>
+function AnswerCard({
+  msg,
+  onRunChange,
+  onCancelChange,
+}: {
+  msg: Message;
+  onRunChange: () => void;
+  onCancelChange: () => void;
+}) {
+  const meta = msg.meta;
+  const hasRows = !!meta && meta.columns.length > 0;
+  const hasChart = hasRows && !!meta?.chart;
+  const joins = useMemo(() => parseJoins(meta?.sql_query), [meta?.sql_query]);
+  const [view, setView] = useState<View | null>(null);
+  const active: View = view ?? (hasChart ? 'chart' : hasRows ? 'table' : 'sql');
+  const waiting = msg.streaming && !meta && !msg.change && !msg.error;
+
+  const views: { id: View; label: string; icon: IconName; show: boolean }[] = [
+    { id: 'chart', label: 'Chart', icon: 'chart', show: hasChart },
+    {
+      id: 'table',
+      label: `Table${meta ? ` · ${meta.row_count}` : ''}`,
+      icon: 'table',
+      show: hasRows,
+    },
+    {
+      id: 'joins',
+      label: `Joins · ${joins.length}`,
+      icon: 'join',
+      show: joins.length > 0,
+    },
+    { id: 'sql', label: 'SQL', icon: 'code', show: !!meta?.sql_query },
+  ];
+
+  return (
+    <motion.div
+      className="flex gap-3"
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ ...ease, delay: 0.08 }}
+    >
+      <div className="relative hidden sm:flex w-8 h-8 flex-shrink-0 mt-0.5">
+        {msg.streaming && (
+          <motion.span
+            className="absolute inset-0 rounded-full bg-teal-400/40"
+            animate={{ scale: [1, 1.6], opacity: [0.7, 0] }}
+            transition={{ duration: 1.4, repeat: Infinity, ease: 'easeOut' }}
+          />
+        )}
+        <span className="relative w-8 h-8 rounded-full bg-gradient-to-br from-teal-500 to-teal-700 text-white flex items-center justify-center">
+          <Icon name="sparkles" size={15} />
+        </span>
+      </div>
+      <div className="card flex-1 min-w-0 overflow-hidden">
+        {/* Header */}
+        <div className="flex flex-wrap items-center gap-2 px-4 pt-3">
+          <span className="text-sm font-semibold text-slate-900">SQLAnalyst</span>
+          {meta?.source && (
+            <span className="chip">
+              <Icon name="database" size={11} /> {meta.source}
+            </span>
+          )}
+          <span className="flex-1" />
+          {msg.streaming && meta && (
+            <span className="chip border-teal-200 bg-teal-50 text-teal-700">
+              <TypingDots /> Writing
+            </span>
+          )}
+          {!msg.streaming && meta && (
+            <>
+              <span className="chip" title="Time taken">
+                <Icon name="clock" size={11} /> {meta.timing_ms} ms
+              </span>
+              <span
+                className="chip border-emerald-200 bg-emerald-50 text-emerald-700"
+                title="Checked by the SQL safety engine and run read-only"
+              >
+                <Icon name="shield" size={11} />
+                {meta.engine_used === 'file-sqlite' ? 'File' : 'Safe'}
+              </span>
+            </>
+          )}
+        </div>
+
+        <div className="px-4 pb-4 pt-2 space-y-3">
+          {waiting && <Thinking />}
+
+          {msg.error && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1, x: [0, -5, 5, -3, 3, 0] }}
+              transition={{ duration: 0.4 }}
+              className="flex gap-2.5 rounded-xl border border-red-200 bg-red-50 px-3.5 py-3 text-sm text-red-700"
+            >
+              <Icon name="alert" size={16} className="mt-0.5" />
+              <p className="whitespace-pre-wrap">{msg.error}</p>
+            </motion.div>
+          )}
+
+          {msg.text && (
+            <p className="text-[15px] leading-relaxed text-slate-700 whitespace-pre-wrap">
+              {msg.text}
+              {msg.streaming && (
+                <span className="inline-block w-1.5 h-4 ml-0.5 align-middle bg-teal-500 animate-blink" />
+              )}
+            </p>
+          )}
+
+          {msg.change && (
+            <ChangeCard change={msg.change} onRun={onRunChange} onCancel={onCancelChange} />
+          )}
+
+          {meta && views.some(v => v.show) && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={ease}
+              className="rounded-xl border border-slate-200 overflow-hidden"
+            >
+              <LayoutGroup id={`views-${msg.id}`}>
+                <div className="flex items-center gap-1 px-1.5 py-1.5 bg-slate-50 border-b border-slate-200">
+                  {views
+                    .filter(v => v.show)
+                    .map(v => (
+                      <button
+                        key={v.id}
+                        onClick={() => setView(v.id)}
+                        aria-pressed={active === v.id}
+                        className={`relative flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
+                          active === v.id ? 'text-slate-900' : 'text-slate-500 hover:text-slate-800'
+                        }`}
+                      >
+                        {active === v.id && (
+                          <motion.span
+                            layoutId="view-pill"
+                            transition={spring}
+                            className="absolute inset-0 rounded-lg bg-white shadow-sm border border-slate-200"
+                          />
+                        )}
+                        <span className="relative flex items-center gap-1.5">
+                          <Icon name={v.icon} size={13} /> {v.label}
+                        </span>
+                      </button>
+                    ))}
+                  <span className="flex-1" />
+                  {active === 'table' && hasRows && (
+                    <button
+                      onClick={() => downloadCsv(meta.columns, meta.rows)}
+                      className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium text-slate-500 hover:text-slate-900 hover:bg-white"
+                    >
+                      <Icon name="download" size={13} /> CSV
+                    </button>
+                  )}
+                  {active === 'sql' && <CopyButton text={meta.sql_query} />}
+                </div>
+              </LayoutGroup>
+
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.div
+                  key={active}
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.18 }}
+                >
+                  {active === 'chart' && hasChart && (
+                    <div className="p-4">
+                      <ChartComponent chart={meta.chart!} columns={meta.columns} rows={meta.rows} />
+                    </div>
+                  )}
+                  {active === 'table' && hasRows && (
+                    <>
+                      {joins.length > 0 && (
+                        <button
+                          onClick={() => setView('joins')}
+                          className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs text-slate-600 bg-teal-50/60 border-b border-slate-200 hover:bg-teal-50"
+                        >
+                          <Icon name="join" size={13} className="text-teal-700" />
+                          <span className="truncate">
+                            Combines{' '}
+                            {[joins[0].left, ...joins.map(j => j.right)].map((t, i, all) => (
+                              <span key={i}>
+                                <span className="font-mono font-medium text-slate-800">{t}</span>
+                                {i < all.length - 1 && ' + '}
+                              </span>
+                            ))}
+                          </span>
+                          <span className="ml-auto flex-shrink-0 font-medium text-teal-700">
+                            See how →
+                          </span>
+                        </button>
+                      )}
+                      <DataTable columns={meta.columns} rows={meta.rows} />
+                    </>
+                  )}
+                  {active === 'joins' && joins.length > 0 && <JoinView joins={joins} />}
+                  {active === 'sql' && <SqlCode sql={meta.sql_query} />}
+                </motion.div>
+              </AnimatePresence>
+            </motion.div>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+// Cycles through what the assistant is doing while it waits for the first result
+const THINKING_STEPS = [
+  'Understanding your question…',
+  'Writing SQL…',
+  'Querying the database…',
+  'Preparing the answer…',
+];
+
+function Thinking() {
+  const [step, setStep] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setStep(s => Math.min(s + 1, THINKING_STEPS.length - 1)), 1600);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <div className="py-1 space-y-3" aria-live="polite">
+      <div className="flex items-center gap-2.5 text-sm text-slate-500 h-5">
+        <TypingDots />
+        <AnimatePresence mode="wait">
+          <motion.span
+            key={step}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.2 }}
+          >
+            {THINKING_STEPS[step]}
+          </motion.span>
+        </AnimatePresence>
+      </div>
+      <div className="space-y-2" aria-hidden>
+        <Skeleton className="h-3 w-11/12" />
+        <Skeleton className="h-3 w-4/5" />
+        <Skeleton className="h-3 w-3/5" />
+      </div>
+    </div>
+  );
+}
+
+function ChangeCard({
+  change,
+  onRun,
+  onCancel,
+}: {
+  change: PendingChange;
+  onRun: () => void;
+  onCancel: () => void;
+}) {
+  const tone =
+    change.state === 'failed'
+      ? 'border-red-200 bg-red-50'
+      : change.state === 'done'
+        ? 'border-emerald-200 bg-emerald-50'
+        : change.state === 'cancelled'
+          ? 'border-slate-200 bg-slate-50'
+          : 'border-amber-200 bg-amber-50';
+  return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.98 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={spring}
+      className={`rounded-xl border p-3.5 space-y-3 transition-colors duration-300 ${tone}`}
+    >
+      <div className="flex items-start gap-2">
+        <Icon name="alert" size={16} className="mt-0.5 text-amber-600" />
+        <div className="text-sm">
+          <p className="font-semibold text-slate-900">
+            {change.kind.toUpperCase()} on {change.database}
+            {change.full_table && <span className="text-red-700"> · affects the whole table</span>}
+          </p>
+          {change.state === 'waiting' && (
+            <p className="text-slate-600 mt-0.5">
+              Nothing has changed yet. Check the statement, then run it or cancel.
+            </p>
+          )}
+        </div>
+      </div>
+      <div className="rounded-lg overflow-hidden border border-slate-200">
+        <SqlCode sql={change.sql} />
+      </div>
+      {change.state === 'waiting' && (
+        <div className="flex gap-2">
+          <button onClick={onRun} className="btn-danger py-1.5">
+            <Icon name="play" size={13} /> Run change
+          </button>
+          <button onClick={onCancel} className="btn-secondary py-1.5">
+            Cancel
+          </button>
         </div>
       )}
-    </div>
-  );
-}
-
-function SqlBlock({ sql }: { sql: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="rounded-xl overflow-hidden border border-teal-900/20">
-      <div className="flex items-center justify-between px-3 py-1.5
-                      bg-teal-900/90 border-b border-teal-700/30">
-        <span className="text-[11px] font-mono font-medium text-teal-300 uppercase tracking-wider">
-          SQL Query
-        </span>
-        <button onClick={() => {
-          navigator.clipboard.writeText(sql).then(() => {
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1600);
-          });
-        }}
-          className="text-[11px] px-2 py-0.5 rounded-md bg-teal-700/40
-                     text-teal-300 hover:bg-teal-600/50 hover:text-white
-                     transition-colors font-medium">
-          {copied ? 'Copied' : 'Copy'}
-        </button>
-      </div>
-      <pre className="bg-teal-950 px-4 py-3 font-mono text-sm text-teal-300
-                      overflow-x-auto whitespace-pre-wrap leading-relaxed">
-        {sql}
-      </pre>
-    </div>
-  );
-}
-
-function DataTable({ columns, rows }: { columns: string[]; rows: (string | number | null)[][] }) {
-  return (
-    <div className="overflow-x-auto rounded-xl border border-teal-100">
-      <table className="w-full border-collapse text-xs">
-        <thead>
-          <tr className="bg-teal-50">
-            {columns.map(c => (
-              <th key={c} className="px-3 py-2 text-left font-bold text-teal-600
-                                     uppercase tracking-wider border-b border-teal-100
-                                     text-[10px] whitespace-nowrap">{c}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.slice(0, 15).map((row, i) => (
-            <tr key={i} className="border-b border-teal-50 hover:bg-teal-50/50 transition-colors">
-              {row.map((cell, j) => (
-                <td key={j} className="px-3 py-2 text-teal-800 whitespace-nowrap">
-                  {cell === null || cell === undefined
-                    ? <span className="text-teal-300 italic">NULL</span>
-                    : String(cell)}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {rows.length > 15 && (
-        <p className="text-center text-[11px] text-teal-400 py-2 border-t border-teal-50">
-          Showing 15 of {rows.length} rows
+      {change.state === 'running' && (
+        <p className="flex items-center gap-2 text-sm font-medium text-amber-800">
+          <TypingDots className="bg-amber-500" /> Running…
         </p>
       )}
-    </div>
+      {change.result && (
+        <p
+          className={`text-sm font-medium ${
+            change.state === 'failed'
+              ? 'text-red-700'
+              : change.state === 'done'
+                ? 'text-emerald-800'
+                : 'text-slate-600'
+          }`}
+        >
+          {change.result}
+        </p>
+      )}
+    </motion.div>
+  );
+}
+
+function FileCard({ msg }: { msg: Message }) {
+  const f = msg.fileResult;
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={ease}
+      className="card p-4 space-y-3"
+    >
+      <div className="flex items-center gap-3">
+        <span className="w-9 h-9 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center">
+          <Icon name="file" size={17} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="font-semibold text-sm text-slate-900 truncate">
+            {f ? f.filename : msg.question}
+          </p>
+          {f && (
+            <p className="text-xs text-slate-500">
+              {f.rows.toLocaleString()} rows · {f.columns.length} columns · questions now use this
+              file
+            </p>
+          )}
+        </div>
+        {!f && !msg.error && (
+          <span className="w-4 h-4 border-2 border-teal-500 border-t-transparent rounded-full animate-spin" />
+        )}
+      </div>
+      {msg.error && (
+        <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+          {msg.error}
+        </p>
+      )}
+      {f && (
+        <>
+          {f.analysis && <p className="text-sm text-slate-700 leading-relaxed">{f.analysis}</p>}
+          <div className="rounded-xl border border-slate-200 overflow-hidden">
+            <DataTable
+              columns={f.columns}
+              rows={f.preview.map(r =>
+                f.columns.map(c => (r[c] ?? null) as string | number | null),
+              )}
+              maxHeight="max-h-60"
+            />
+          </div>
+        </>
+      )}
+    </motion.div>
+  );
+}
+
+function SqlCode({ sql }: { sql: string }) {
+  return (
+    <pre className="bg-slate-900 text-slate-100 px-4 py-3 font-mono text-[13px] leading-relaxed overflow-x-auto whitespace-pre-wrap">
+      {sql}
+    </pre>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={() =>
+        navigator.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        })
+      }
+      className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium text-slate-500 hover:text-slate-900 hover:bg-white"
+    >
+      <Icon name={copied ? 'check' : 'copy'} size={13} /> {copied ? 'Copied' : 'Copy'}
+    </button>
   );
 }

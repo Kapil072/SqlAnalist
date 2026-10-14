@@ -12,7 +12,7 @@ RAG integration
 ---------------
 Before generating the explanation the handler:
   a. Retrieves the top-3 most relevant past Q&A turns from the session's
-     in-memory FAISS store.
+     in-memory FAISS store (scoped to the authenticated user).
   b. Injects them into the RAG_EXPLANATION_PROMPT.
 After the explanation is fully assembled it is stored back into the FAISS
 store so future turns can reference it.
@@ -20,157 +20,106 @@ store so future turns can reference it.
 
 from __future__ import annotations
 
+import asyncio
 import json
-import re
-import time
 import uuid
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from collections.abc import AsyncGenerator
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core.security import decode_token
-from app.db.executor import execute_safe_query, QueryResult
-from app.db.schema_registry import get_schema
+from app.core.security import authenticate_request
 from app.db.session import AsyncSessionLocal
-from app.langchain_chains.prompts import SQL_GENERATION_PROMPT, RAG_EXPLANATION_PROMPT
+from app.langchain_chains.prompts import RAG_EXPLANATION_PROMPT
 from app.langchain_chains.rag_memory import get_session_rag
-from app.models.data_source import DataSource
-from app.services.connection_manager import ConnectionManager
-from app.sql_safety.validator import validate_sql
+from app.services.query_pipeline import (
+    SQLGenerationError,
+    fallback_explanation,
+    generate_sql,
+    infer_chart,
+    is_direct_sql,
+    is_write_sql,
+    llm_configured,
+    load_active_data_source,
+    public_error,
+    resolve_context,
+    run_query,
+    source_label,
+)
+from app.sql_safety.admin_writes import AdminSQLError, validate_admin_sql
+from app.sql_safety.validator import SQLValidationError, validate_sql
 from app.utils.logger import logger
 
 router = APIRouter(tags=["analysis"])
+
+EXPLANATION_PREVIEW_ROWS = 20
+
+# Strong references to fire-and-forget tasks — without this, asyncio may
+# garbage-collect a task before it finishes.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _fire_and_forget(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+async def _write_audit_log(
+    user_id: str | None,
+    question: str,
+    sql_used: str | None = None,
+    row_count: int | None = None,
+    timing_ms: int | None = None,
+    status: str = "success",
+    error_msg: str | None = None,
+    session_id: str | None = None,
+) -> None:
+    """Safely persist audit logs in background task without raising exceptions."""
+    try:
+        from app.models.audit_log import AuditLog
+
+        uid = uuid.UUID(user_id) if user_id else None
+        try:
+            sid = uuid.UUID(session_id) if session_id else None
+        except ValueError:
+            sid = None
+        async with AsyncSessionLocal() as db:
+            db.add(
+                AuditLog(
+                    user_id=uid,
+                    session_id=sid,
+                    question=question,
+                    sql_used=sql_used,
+                    row_count=row_count,
+                    timing_ms=timing_ms,
+                    status=status,
+                    error_msg=error_msg,
+                )
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"[AUDIT] Failed to write audit log: {e}")
 
 
 # ---------------------------------------------------------------------------
 # Request model
 # ---------------------------------------------------------------------------
 
+
 class AskStreamRequest(BaseModel):
     question: str
-    session_id: Optional[str] = None        # client-supplied or auto-generated
-    data_source_id: Optional[str] = None
+    session_id: str | None = None  # client-supplied or auto-generated
+    data_source_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
-# Inline auth helper for streaming routes
+# SSE helpers
 # ---------------------------------------------------------------------------
 
-async def _authenticate(request: Request) -> str:
-    """
-    Extract and validate the Bearer JWT from the request headers.
-    Returns the user_id (sub claim) on success.
-    Raises HTTP 401 on any failure.
-
-    We do this inline instead of using Depends(get_current_user) because
-    FastAPI's dependency injection doesn't compose cleanly with
-    StreamingResponse — the DB session lifetime and header parsing can
-    behave unexpectedly when the route returns a generator.
-    """
-    import jwt as _jwt
-
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing authentication token")
-
-    token_str = auth_header[len("Bearer "):]
-    try:
-        payload = decode_token(token_str)
-    except _jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
-    except _jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid authentication token")
-
-    if payload.get("type") != "access":
-        raise HTTPException(status_code=401, detail="Invalid token type")
-
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Token missing subject")
-
-    # Verify user exists and is active using a short-lived DB session
-    from app.models.user import User
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(User).where(User.id == uuid.UUID(user_id))
-        )
-        user = result.scalar_one_or_none()
-        if user is None:
-            raise HTTPException(status_code=401, detail="User not found")
-        if not user.is_active:
-            raise HTTPException(status_code=403, detail="Account is deactivated")
-
-    return user_id
-
-
-# ---------------------------------------------------------------------------
-# Helpers (shared with ask.py logic, kept local to avoid tight coupling)
-# ---------------------------------------------------------------------------
-
-def _clean_sql(raw: str) -> str:
-    clean = raw.strip()
-    clean = re.sub(r"^```(?:sql)?", "", clean, flags=re.IGNORECASE).strip()
-    clean = re.sub(r"```$", "", clean).strip()
-    return clean.rstrip(";")
-
-
-def _groq_sql(
-    question: str,
-    schema_context: Optional[Any] = None,
-    dialect: str = "mysql",
-) -> Optional[str]:
-    key = settings.groq_api_key.strip()
-    if not key or key == "gsk_your_key_here" or not key.startswith("gsk_"):
-        return None
-    try:
-        from groq import Groq
-        client = Groq(api_key=key, base_url=settings.llm_base_url)
-        if schema_context is None:
-            schema_context = get_schema()
-        context_str = json.dumps(schema_context, indent=2) if isinstance(schema_context, dict) else str(schema_context)
-        system_prompt = SQL_GENERATION_PROMPT.format(
-            context=context_str, question=question
-        )
-        resp = client.chat.completions.create(
-            model=settings.llm_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question},
-            ],
-            temperature=settings.llm_temperature,
-            max_tokens=settings.llm_max_tokens,
-        )
-        cleaned = _clean_sql(resp.choices[0].message.content or "")
-        lower_cleaned = cleaned.lower()
-        if not cleaned or "cannot answer" in lower_cleaned or not (lower_cleaned.startswith("select") or lower_cleaned.startswith("with")):
-            return None
-        return cleaned
-    except Exception as exc:
-        logger.warning(f"[STREAM] Groq SQL gen failed: {exc}")
-        return None
-
-
-def _infer_chart(columns: List[str], rows: List[List[Any]]) -> Optional[Dict]:
-    if not columns or not rows:
-        return None
-    x = columns[0]
-    y = columns[1] if len(columns) > 1 else None
-    return {
-        "type": "pie",
-        "title": f"{x.replace('_', ' ').title()} Distribution",
-        "x_axis": x,
-        "y_axis": y,
-    }
-
-
-# ---------------------------------------------------------------------------
-# SSE generator
-# ---------------------------------------------------------------------------
 
 def _sse(event: str, data: Any) -> str:
     """Format a single SSE frame."""
@@ -178,275 +127,253 @@ def _sse(event: str, data: Any) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
+async def _stream_explanation(prompt_text: str) -> AsyncGenerator[str, None]:
+    """
+    Stream explanation tokens from Groq. The Groq iterator is blocking, so it
+    runs in a worker thread and tokens are piped back through an asyncio.Queue.
+    """
+    from groq import Groq
+
+    done = object()
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def _worker():
+        try:
+            client = Groq(api_key=settings.groq_api_key.strip(), base_url=settings.llm_base_url)
+            stream = client.chat.completions.create(
+                model=settings.llm_model,
+                messages=[{"role": "user", "content": prompt_text}],
+                temperature=settings.llm_explanation_temperature,
+                max_tokens=settings.llm_explanation_max_tokens,
+                stream=True,
+            )
+            for chunk in stream:
+                token = getattr(chunk.choices[0].delta, "content", None) or ""
+                if token:
+                    loop.call_soon_threadsafe(queue.put_nowait, token)
+        except Exception as e:
+            logger.warning(f"[STREAM] Groq thread error: {e}")
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, done)
+
+    loop.run_in_executor(None, _worker)
+    while True:
+        item = await queue.get()
+        if item is done:
+            break
+        yield item
+
+
+# ---------------------------------------------------------------------------
+# SSE generator
+# ---------------------------------------------------------------------------
+
+
 async def _stream_response(
     question: str,
     session_id: str,
-    data_source_id: Optional[str],
+    data_source_id: str | None,
+    user_id: str,
+    is_admin: bool = False,
 ) -> AsyncGenerator[str, None]:
-    """
-    Core async generator that drives the SSE stream.
-    Yields SSE-formatted strings.
+    """Core async generator that drives the SSE stream. Never blocks the event loop."""
 
-    All CPU-bound and blocking I/O operations are offloaded to
-    asyncio.to_thread() so the event loop is never blocked.
-    """
-    import asyncio
+    def _audit_error(msg: str, sql: str | None = None) -> None:
+        _fire_and_forget(
+            _write_audit_log(
+                user_id=user_id,
+                question=question,
+                sql_used=sql,
+                status="error",
+                error_msg=msg,
+                session_id=session_id,
+            )
+        )
 
-    # ------------------------------------------------------------------
-    # 0. RAG – retrieve relevant history (CPU-bound encode → thread)
-    # ------------------------------------------------------------------
-    rag = get_session_rag(session_id)
-    past_turns: List[str] = await asyncio.to_thread(rag.retrieve, question, 3)
-    rag_context = (
-        "\n\n".join(past_turns)
-        if past_turns
-        else "No relevant conversation history yet."
-    )
+    # 0. RAG – history is scoped to this user (a client cannot read another
+    #    user's history by sending their session_id)
+    rag = get_session_rag(f"{user_id}:{session_id}")
+    past_turns: list[str] = await asyncio.to_thread(rag.retrieve, question, 3)
+    rag_context = "\n\n".join(past_turns) if past_turns else "No relevant conversation history yet."
 
-    # ------------------------------------------------------------------
-    # 1. Resolve data source + dialect
-    # ------------------------------------------------------------------
+    # 1. Resolve data source + dialect + schema
     data_source = None
-    dialect = "mysql"
-
     if data_source_id:
         try:
-            ds_uuid = uuid.UUID(data_source_id)
             async with AsyncSessionLocal() as db:
-                result = await db.execute(
-                    select(DataSource).where(DataSource.id == ds_uuid)
-                )
-                data_source = result.scalar_one_or_none()
-            if not data_source:
-                yield _sse("error", {"detail": "Data source not found"})
-                return
-            if not data_source.is_active:
-                yield _sse("error", {"detail": "Data source is not active"})
-                return
-            dialect_map = {
-                "postgresql": "postgres",
-                "mysql": "mysql",
-                "sqlite": "sqlite",
-                "sqlserver": "mssql",
-                "oracle": "oracle",
-            }
-            dialect = dialect_map.get(data_source.db_type, "mysql")
-        except ValueError:
-            yield _sse("error", {"detail": "Invalid data source ID"})
+                data_source = await load_active_data_source(db, data_source_id)
+        except HTTPException as exc:
+            yield _sse("error", {"detail": exc.detail})
             return
+    try:
+        dialect, schema, allowed_tables = await resolve_context(data_source)
+    except HTTPException as exc:
+        _audit_error(str(exc.detail))
+        yield _sse("error", {"detail": exc.detail})
+        return
 
-    # ------------------------------------------------------------------
-    # 2. SQL generation (Direct SQL or Groq LLM via active schema)
-    # ------------------------------------------------------------------
-    active_schema = None
-    if data_source:
-        active_schema = await ConnectionManager.get_schema(data_source)
-    else:
-        active_schema = get_schema()
-
-    lower_q = question.lower()
-    if lower_q.startswith("select ") or lower_q.startswith("with "):
-        generated_sql = question.rstrip(";")
+    # 2. SQL generation (admins may also ask for — or type — a change)
+    can_write = is_admin and settings.admin_sql_writes
+    if is_direct_sql(
+        question, allow_writes=can_write, dialect=dialect, known_tables=allowed_tables
+    ):
+        generated_sql = question
         engine_used = "direct-sql"
     else:
-        generated_sql = await asyncio.to_thread(_groq_sql, question, active_schema, dialect)
+        try:
+            generated_sql = await asyncio.to_thread(
+                generate_sql, question, schema, dialect, can_write
+            )
+        except SQLGenerationError as exc:
+            _audit_error(exc.detail)
+            yield _sse("error", {"detail": exc.detail})
+            return
         engine_used = "groq-llm"
 
-    if not generated_sql:
-        yield _sse("error", {
-            "detail": "Failed to generate SQL query for your question with the current database schema. Please check that your database has relevant tables or provide a direct SQL query."
-        })
-        return
-
-    # ------------------------------------------------------------------
-    # 3. Safety validation (pure CPU → thread)
-    # ------------------------------------------------------------------
-    try:
-        validated_sql: str = await asyncio.to_thread(
-            validate_sql, generated_sql, dialect
-        )
-    except Exception as val_err:
-        yield _sse("error", {"detail": f"Safety Check Failed: {val_err}"})
-        return
-
-    # ------------------------------------------------------------------
-    # 4. Execute query
-    #    - Dynamic data source: already async via SQLAlchemy async engine
-    #    - Default target DB:   blocking call → thread
-    # ------------------------------------------------------------------
-    try:
-        if data_source:
-            engine = ConnectionManager.get_engine(data_source)
-            max_rows = settings.db_max_rows
-            t0 = time.monotonic()
-            async with engine.connect() as conn:
-                if data_source.db_type == "postgresql":
-                    try:
-                        await conn.execute(text("SET statement_timeout = '30s'"))
-                    except Exception:
-                        pass
-                result = await conn.execute(text(validated_sql))
-                columns: List[str] = []
-                rows: List[List[Any]] = []
-                truncated = False
-                if result.returns_rows:
-                    columns = list(result.keys())
-                    raw_rows = result.fetchmany(max_rows + 1)
-                    if len(raw_rows) > max_rows:
-                        raw_rows = raw_rows[:max_rows]
-                        truncated = True
-                    rows = [list(r) for r in raw_rows]
-                timing_ms = int((time.monotonic() - t0) * 1000)
-                res = QueryResult(
-                    columns=columns,
-                    rows=rows,
-                    row_count=len(rows),
-                    timing_ms=timing_ms,
-                    truncated=truncated,
-                )
-        else:
-            # execute_safe_query is synchronous — offload to thread
-            res: QueryResult = await asyncio.to_thread(
-                execute_safe_query, validated_sql
+    # 2b. A change (INSERT/UPDATE/DELETE/DDL) is never run from the chat
+    #     directly: the admin sees the statement and confirms it, and the
+    #     frontend then runs it through POST /admin/sql/execute.
+    if is_write_sql(generated_sql):
+        if not can_write:
+            msg = (
+                "Only admins can change data, and only after confirming the change. "
+                "Ask a question about the data instead."
             )
+            _audit_error(msg, generated_sql)
+            yield _sse("error", {"detail": msg})
+            return
+        try:
+            stmt = validate_admin_sql(
+                generated_sql,
+                dialect=dialect,
+                existing_tables=allowed_tables,
+                allow_full_table=True,
+            )
+        except AdminSQLError as exc:
+            _audit_error(exc.message, generated_sql)
+            yield _sse("error", {"detail": f"This change is not allowed: {exc.message}"})
+            return
+        full_table = False
+        try:
+            validate_admin_sql(stmt.sql, dialect=dialect, existing_tables=allowed_tables)
+        except AdminSQLError as exc:
+            full_table = exc.needs_confirmation
+        target = source_label(data_source)
+        yield _sse(
+            "confirm",
+            {
+                "sql": stmt.sql,
+                "kind": stmt.kind,
+                "full_table": full_table,
+                "database": target,
+                "data_source_id": data_source_id,
+                "engine_used": engine_used,
+            },
+        )
+        note = (
+            f"This is a {stmt.kind.upper()} on {target}. Nothing has been changed yet — "
+            "review the statement and click Run change to apply it."
+        )
+        if full_table:
+            note += (
+                " It affects every row of the table (or removes it), so you will be asked twice."
+            )
+        yield _sse("token", {"token": note})
+        yield _sse("done", {"explanation": note, "pending_change": True})
+        return
+
+    # 3. Safety validation
+    try:
+        validated_sql = await asyncio.to_thread(
+            validate_sql, generated_sql, dialect, allowed_tables
+        )
+    except SQLValidationError as val_err:
+        _audit_error(str(val_err), generated_sql)
+        yield _sse("error", {"detail": f"Safety Check Failed: {val_err.message}"})
+        return
+
+    # 4. Execute
+    try:
+        res = await run_query(validated_sql, data_source)
     except Exception as exec_err:
         logger.error(f"[STREAM] Execution error: {exec_err}")
-        yield _sse("error", {"detail": f"Database Execution Error: {exec_err}"})
+        _audit_error(str(exec_err), validated_sql)
+        yield _sse("error", {"detail": public_error("Database execution error", exec_err)})
         return
 
-    # ------------------------------------------------------------------
-    # 5. Send metadata frame immediately — client renders table/chart now
-    # ------------------------------------------------------------------
-    chart = _infer_chart(res.columns, res.rows)
-    yield _sse("meta", {
-        "sql_query": validated_sql,
-        "columns": res.columns,
-        "rows": res.rows,
-        "row_count": res.row_count,
-        "timing_ms": res.timing_ms,
-        "chart": chart,
-        "engine_used": engine_used,
-        "session_id": session_id,
-        "rag_turns_used": len(past_turns),
-    })
+    # 5. Metadata frame — client renders table/chart now
+    yield _sse(
+        "meta",
+        {
+            "sql_query": validated_sql,
+            "columns": res.columns,
+            "rows": res.rows,
+            "row_count": res.row_count,
+            "truncated": res.truncated,
+            "timing_ms": res.timing_ms,
+            "chart": infer_chart(res.columns, res.rows),
+            "engine_used": engine_used,
+            "session_id": session_id,
+            "rag_turns_used": len(past_turns),
+        },
+    )
 
-    # ------------------------------------------------------------------
     # 6. Stream explanation tokens via Groq
-    #    The Groq streaming iterator is blocking (sync HTTP).
-    #    We run it in a thread and pipe tokens back via an asyncio.Queue
-    #    so the event loop stays free between chunks.
-    # ------------------------------------------------------------------
-    key = settings.groq_api_key.strip()
     full_explanation = ""
-
-    if key and key.startswith("gsk_") and key != "gsk_your_key_here":
+    if llm_configured():
         try:
-            from groq import Groq
-
-            results_preview = json.dumps(
-                {"columns": res.columns, "rows": res.rows[:20]},
-                default=str,
-            )
             prompt_text = RAG_EXPLANATION_PROMPT.format(
                 rag_context=rag_context,
                 question=question,
                 sql_query=validated_sql,
-                results=results_preview,
+                preview_rows=min(EXPLANATION_PREVIEW_ROWS, res.row_count),
+                total_rows=res.row_count,
+                results=json.dumps(
+                    {"columns": res.columns, "rows": res.rows[:EXPLANATION_PREVIEW_ROWS]},
+                    default=str,
+                ),
             )
-
-            # Use a sentinel to signal end-of-stream from the thread
-            _DONE = object()
-            token_queue: asyncio.Queue = asyncio.Queue()
-            loop = asyncio.get_event_loop()
-
-            def _run_groq_stream():
-                """Runs in a worker thread. Puts tokens into the queue."""
-                try:
-                    client = Groq(api_key=key, base_url=settings.llm_base_url)
-                    stream = client.chat.completions.create(
-                        model=settings.llm_model,
-                        messages=[{"role": "user", "content": prompt_text}],
-                        temperature=settings.llm_explanation_temperature,
-                        max_tokens=settings.llm_explanation_max_tokens,
-                        stream=True,
-                    )
-                    for chunk in stream:
-                        delta = chunk.choices[0].delta
-                        token = getattr(delta, "content", None) or ""
-                        if token:
-                            loop.call_soon_threadsafe(token_queue.put_nowait, token)
-                except Exception as e:
-                    logger.warning(f"[STREAM] Groq thread error: {e}")
-                finally:
-                    loop.call_soon_threadsafe(token_queue.put_nowait, _DONE)
-
-            # Start the blocking Groq call in a thread
-            asyncio.get_event_loop().run_in_executor(None, _run_groq_stream)
-
-            # Drain the queue asynchronously — event loop is free between gets
-            while True:
-                item = await token_queue.get()
-                if item is _DONE:
-                    break
-                full_explanation += item
-                yield _sse("token", {"token": item})
-
+            async for token in _stream_explanation(prompt_text):
+                full_explanation += token
+                yield _sse("token", {"token": token})
         except Exception as stream_err:
             logger.warning(f"[STREAM] Groq streaming setup failed: {stream_err}")
 
-    # ------------------------------------------------------------------
     # 7. Static fallback explanation if Groq didn't produce anything
-    # ------------------------------------------------------------------
     if not full_explanation:
-        if not res.rows:
-            full_explanation = "No matching records were found for this question."
-        elif len(res.rows) == 1:
-            metrics = ", ".join(
-                f"{c.replace('_', ' ').title()}: {v}"
-                for c, v in zip(res.columns, res.rows[0])
-            )
-            full_explanation = f"Summary metric: {metrics}."
-        else:
-            top = res.rows[0]
-            label = top[1] if len(res.columns) > 1 else top[0]
-            full_explanation = (
-                f"Returned {res.row_count} rows. "
-                f"Top result: '{label}' with "
-                f"{res.columns[-1].replace('_', ' ')} of {top[-1]}."
-            )
+        db_label = data_source.name if data_source else "the database"
+        full_explanation = fallback_explanation(res.columns, res.rows, db_label=db_label)
         yield _sse("token", {"token": full_explanation})
 
-    # ------------------------------------------------------------------
-    # 8. Store turn in RAG (CPU-bound encode → thread, fire-and-forget)
-    # ------------------------------------------------------------------
-    # 8. Store turn in RAG + write AuditLog
-    # ------------------------------------------------------------------
-    asyncio.ensure_future(
-        asyncio.to_thread(rag.add, question, full_explanation)
+    # 8. Store turn in RAG + write AuditLog (fire-and-forget)
+    _fire_and_forget(asyncio.to_thread(rag.add, question, full_explanation))
+    _fire_and_forget(
+        _write_audit_log(
+            user_id=user_id,
+            question=question,
+            sql_used=validated_sql,
+            row_count=res.row_count,
+            timing_ms=res.timing_ms,
+            status="success",
+            session_id=session_id,
+        )
     )
 
-    # Fire-and-forget audit log write
-    asyncio.ensure_future(_write_audit_log(
-        user_id=_current_user_id,
-        question=question,
-        sql_used=validated_sql,
-        row_count=res.row_count,
-        timing_ms=res.timing_ms,
-        status="success",
-    ))
-
-    # ------------------------------------------------------------------
     # 9. Done frame
-    # ------------------------------------------------------------------
-    yield _sse("done", {
-        "explanation": full_explanation,
-        "rag_store_size": rag.size(),
-    })
+    yield _sse(
+        "done",
+        {
+            "explanation": full_explanation,
+            "rag_store_size": rag.size(),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
 # Route
 # ---------------------------------------------------------------------------
+
 
 @router.post("/ask/stream")
 async def ask_stream(
@@ -466,19 +393,21 @@ async def ask_stream(
     """
     # Auth is validated eagerly before opening the stream so the client
     # gets a clean HTTP 401 instead of a broken SSE connection.
-    await _authenticate(request)
+    user = await authenticate_request(request)
 
     question = body.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    session_id = body.session_id or str(uuid.uuid4())
+    session_id = (body.session_id or str(uuid.uuid4()))[:64]
 
     return StreamingResponse(
         _stream_response(
             question=question,
             session_id=session_id,
             data_source_id=body.data_source_id,
+            user_id=str(user.id),
+            is_admin=user.role == "admin",
         ),
         media_type="text/event-stream",
         headers={

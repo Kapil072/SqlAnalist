@@ -1,17 +1,20 @@
 """
 Pytest configuration and fixtures for testing dynamic data sources.
 """
+
+import sqlite3
+
 import pytest
-import asyncio
-from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.main import app
-from app.db.base import Base
-from app.models.user import User
 from app.core.security import create_access_token, hash_password
-
+from app.db.base import Base
+from app.main import app
+from app.models.data_source import DataSource
+from app.models.user import User
+from app.services.connection_manager import ConnectionManager
 
 # Test database configuration
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
@@ -60,7 +63,7 @@ async def client(db_session):
 
     app.dependency_overrides[get_db] = override_get_db
 
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
 
     app.dependency_overrides.clear()
@@ -101,12 +104,50 @@ async def regular_user(db_session: AsyncSession):
 
 
 @pytest.fixture(scope="function")
-def admin_token(admin_user: User):
+async def admin_token(admin_user: User):
     """Create an admin access token."""
     return create_access_token(data={"sub": str(admin_user.id), "role": admin_user.role})
 
 
 @pytest.fixture(scope="function")
-def user_token(regular_user: User):
+async def user_token(regular_user: User):
     """Create a regular user access token."""
     return create_access_token(data={"sub": str(regular_user.id), "role": regular_user.role})
+
+
+@pytest.fixture(scope="function")
+async def shop(db_session, admin_user, tmp_path):
+    """An admin-added SQLite data source with an `items` table holding 2 rows."""
+    path = tmp_path / "shop.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, price INTEGER)")
+    conn.executemany("INSERT INTO items (name, price) VALUES (?, ?)", [("pen", 2), ("book", 9)])
+    conn.commit()
+    conn.close()
+    ds = DataSource(
+        user_id=admin_user.id,
+        name="Shop",
+        db_type="sqlite",
+        database_name=str(path),
+        is_active=True,
+    )
+    db_session.add(ds)
+    await db_session.commit()
+    await db_session.refresh(ds)
+    yield ds, str(path)
+    ConnectionManager.invalidate_cache(ds.id)
+
+
+@pytest.fixture(scope="function")
+def shared_sessions(db_engine, monkeypatch):
+    """
+    Streaming routes and the audit log open their own sessions
+    (AsyncSessionLocal) instead of using get_db — point them at the test DB.
+    """
+    from app.api.routes import admin_sql, ask_stream
+    from app.core import security
+
+    maker = async_sessionmaker(bind=db_engine, class_=AsyncSession, expire_on_commit=False)
+    for module in (security, ask_stream, admin_sql):
+        monkeypatch.setattr(module, "AsyncSessionLocal", maker)
+    return maker

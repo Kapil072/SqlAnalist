@@ -5,145 +5,194 @@
         {
           "name": "customer_id",
           "type": "INTEGER",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "name",
           "type": "VARCHAR(255)",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "email",
           "type": "VARCHAR(255)",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "country",
           "type": "VARCHAR(100)",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "city",
           "type": "VARCHAR(100)",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "created_at",
           "type": "DATETIME",
-          "nullable": true
+          "nullable": true,
+          "default": "CURRENT_TIMESTAMP"
         }
       ],
-      "row_count": 30
+      "row_count": 30,
+      "primary_key": [
+        "customer_id"
+      ],
+      "unique": [
+        [
+          "email"
+        ]
+      ]
     },
     "order_items": {
       "columns": [
         {
           "name": "item_id",
           "type": "INTEGER",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "order_id",
           "type": "INTEGER",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "product_id",
           "type": "INTEGER",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "quantity",
           "type": "INTEGER",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "unit_price",
           "type": "DECIMAL(10, 2)",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "subtotal",
           "type": "DECIMAL(10, 2)",
-          "nullable": false
+          "nullable": false,
+          "default": null
         }
       ],
-      "row_count": 290
+      "row_count": 290,
+      "primary_key": [
+        "item_id"
+      ],
+      "foreign_keys": [
+        "order_id \u2192 orders(order_id)",
+        "product_id \u2192 products(product_id)"
+      ]
     },
     "orders": {
       "columns": [
         {
           "name": "order_id",
           "type": "INTEGER",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "customer_id",
           "type": "INTEGER",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "status",
           "type": "VARCHAR(50)",
-          "nullable": true
+          "nullable": true,
+          "default": "'pending'"
         },
         {
           "name": "total_amount",
           "type": "DECIMAL(10, 2)",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "created_at",
           "type": "DATETIME",
-          "nullable": true
+          "nullable": true,
+          "default": "CURRENT_TIMESTAMP"
         },
         {
           "name": "shipped_at",
           "type": "DATETIME",
-          "nullable": true
+          "nullable": true,
+          "default": null
         },
         {
           "name": "delivered_at",
           "type": "DATETIME",
-          "nullable": true
+          "nullable": true,
+          "default": null
         }
       ],
-      "row_count": 120
+      "row_count": 120,
+      "primary_key": [
+        "order_id"
+      ],
+      "foreign_keys": [
+        "customer_id \u2192 customers(customer_id)"
+      ]
     },
     "products": {
       "columns": [
         {
           "name": "product_id",
           "type": "INTEGER",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "name",
           "type": "VARCHAR(255)",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "category",
           "type": "VARCHAR(100)",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "price",
           "type": "DECIMAL(10, 2)",
-          "nullable": false
+          "nullable": false,
+          "default": null
         },
         {
           "name": "stock_quantity",
           "type": "INTEGER",
-          "nullable": true
+          "nullable": true,
+          "default": "'0'"
         },
         {
           "name": "created_at",
           "type": "DATETIME",
-          "nullable": true
+          "nullable": true,
+          "default": "CURRENT_TIMESTAMP"
         }
       ],
-      "row_count": 24
+      "row_count": 24,
+      "primary_key": [
+        "product_id"
+      ]
     }
   }
 }

@@ -1,12 +1,15 @@
 import uuid
-from datetime import datetime, timezone
-from sqlalchemy import String, DateTime, Text, ForeignKey
+from datetime import UTC, datetime
+
+from sqlalchemy import DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
+
 from app.db.base import Base
 
 
 class ChatMessage(Base):
     """Stores every Q&A turn for a user so the sidebar history works."""
+
     __tablename__ = "chat_messages"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -21,5 +24,5 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )
