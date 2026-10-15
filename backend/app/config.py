@@ -103,6 +103,14 @@ class Settings:
     db_max_rows: int = _int("DB_MAX_ROWS", 10000)
     db_encryption_key: str = os.getenv("DB_ENCRYPTION_KEY", "")
 
+    # Require new accounts to confirm their email with a 6-digit code before
+    # they can log in. Off by default; turn it on once sending email works.
+    email_verification: bool = os.getenv("EMAIL_VERIFICATION", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
     # SMTP (for email verification & password reset)
     smtp_host: str = os.getenv("SMTP_HOST", "").strip()
     smtp_port: int = _int("SMTP_PORT", 465)

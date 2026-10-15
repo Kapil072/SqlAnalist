@@ -91,7 +91,8 @@ def _dev_only(response: dict, **dev_fields) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Register  — creates account + sends OTP immediately
+# Register  — creates account, then sends an OTP (or, with EMAIL_VERIFICATION
+#             off, logs the new user straight in)
 # ---------------------------------------------------------------------------
 
 
@@ -100,6 +101,7 @@ def _dev_only(response: dict, **dev_fields) -> dict:
 async def register(
     request: Request,
     body: RegisterRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     email = body.email.lower()
@@ -118,10 +120,18 @@ async def register(
     await db.commit()
     await db.refresh(user)
 
+    if not settings.email_verification:
+        access_token = issue_token_pair(user, response)
+        return TokenResponse(
+            access_token=access_token,
+            token_type="bearer",
+            user=_user_token_payload(user),
+        )
+
     code = await _issue_otp(db, email)
     email_sent = await asyncio.to_thread(send_otp_email, email, body.name, code)
 
-    response = {
+    result = {
         "id": str(user.id),
         "email": user.email,
         "name": user.name,
@@ -133,8 +143,8 @@ async def register(
         ),
     }
     if not email_sent:
-        _dev_only(response, dev_otp=code)
-    return response
+        _dev_only(result, dev_otp=code)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +270,7 @@ async def login(
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is deactivated")
-    if not user.email_verified:
+    if settings.email_verification and not user.email_verified:
         raise HTTPException(
             status_code=403,
             detail="Email not verified. Please enter the OTP sent to your email.",

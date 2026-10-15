@@ -14,7 +14,9 @@ from app.core.rate_limit import limiter
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
-    # Never send real email from tests; reset rate-limit counters per test
+    # Never send real email from tests; reset rate-limit counters per test.
+    # These tests cover the OTP flow, so verification is on unless a test says otherwise.
+    monkeypatch.setattr(settings, "email_verification", True)
     monkeypatch.setattr(auth_routes, "send_otp_email", lambda *a, **k: False)
     monkeypatch.setattr(auth_routes, "send_password_reset_email", lambda *a, **k: False)
     if hasattr(limiter, "reset"):
@@ -46,6 +48,30 @@ async def test_dev_otp_only_in_development(client: AsyncClient, monkeypatch):
     r = await _register(client, "dev@test.com")
     assert r.status_code == 201
     assert len(r.json()["dev_otp"]) == 6
+
+
+async def test_register_logs_in_directly_without_verification(client: AsyncClient, monkeypatch):
+    monkeypatch.setattr(settings, "email_verification", False)
+    r = await _register(client, "noverify@test.com")
+    assert r.status_code == 201
+    assert r.json()["access_token"]
+    assert r.json()["user"]["email"] == "noverify@test.com"
+    assert "refresh_token" in r.cookies or client.cookies.get("refresh_token")
+
+    # The account is not marked verified, but it can still log in
+    r = await client.post(
+        "/auth/login", json={"email": "noverify@test.com", "password": "Password1"}
+    )
+    assert r.status_code == 200
+    assert r.json()["user"]["email_verified"] is False
+
+
+async def test_unverified_login_blocked_when_verification_on(client: AsyncClient):
+    await _register(client, "blocked@test.com")
+    r = await client.post(
+        "/auth/login", json={"email": "blocked@test.com", "password": "Password1"}
+    )
+    assert r.status_code == 403
 
 
 async def test_otp_locks_after_too_many_wrong_attempts(client: AsyncClient, monkeypatch):

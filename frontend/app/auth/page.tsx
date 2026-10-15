@@ -270,10 +270,20 @@ export default function AuthPage() {
     const fd = new FormData(e.currentTarget);
     const email = String(fd.get('email') || '');
     try {
-      const data = await apiPost<{ dev_otp?: string; email_sent?: boolean; message?: string }>(
-        '/auth/register',
-        { name: fd.get('name'), email, password: fd.get('password') },
-      );
+      const data = await apiPost<{
+        access_token?: string;
+        user?: Record<string, string>;
+        dev_otp?: string;
+        email_sent?: boolean;
+        message?: string;
+      }>('/auth/register', { name: fd.get('name'), email, password: fd.get('password') });
+      // Email verification is off: the account is ready and already signed in
+      if (data.access_token && data.user) {
+        saveSession({ access_token: data.access_token, user: data.user });
+        showAlert('Account created! Redirecting…', 'success');
+        setTimeout(() => router.push('/dashboard'), 600);
+        return;
+      }
       setOtpEmail(email);
       switchTab('otp');
       if (data.dev_otp) {
