@@ -142,13 +142,17 @@ async def lifespan(app: FastAPI):
 
     # Pre-warm the RAG embedding model in a thread so the first real
     # request doesn't pay the 3-5s cold-load cost.
+    from app.langchain_chains.rag_memory import embeddings_enabled
     from app.langchain_chains.rag_memory import warmup as rag_warmup
 
-    try:
-        await asyncio.to_thread(rag_warmup)
-        logger.info("[RAG] Embedding model warmed up.")
-    except Exception as e:
-        logger.warning(f"[RAG] Warmup failed (non-fatal): {e}")
+    if not embeddings_enabled():
+        logger.info("[RAG] Embedding model off — using keyword matching for chat memory.")
+    else:
+        try:
+            await asyncio.to_thread(rag_warmup)
+            logger.info("[RAG] Embedding model warmed up.")
+        except Exception as e:
+            logger.warning(f"[RAG] Warmup failed (non-fatal): {e}")
 
     # Seed a default admin user if no admin exists yet
     await _seed_default_admin()

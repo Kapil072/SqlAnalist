@@ -19,13 +19,20 @@ Performance notes
   real request arrives (avoids a 3-5s spike on the first question).
 - `add()` and `retrieve()` run the CPU-bound encode() synchronously.
   Call them via asyncio.to_thread() from async contexts.
+- With RAG_ENABLED=false, or when faiss / sentence-transformers are not
+  installed, retrieval falls back to keyword overlap. That needs no model,
+  which keeps memory low on small hosts (the model alone is ~500 MB of RAM).
 """
 
 from __future__ import annotations
 
+import importlib.util
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any
+
+from app.config import settings
 
 # ---------------------------------------------------------------------------
 # Lazy imports – keep startup fast; load heavy libs on first use
@@ -51,6 +58,25 @@ def _load_libs():
         _np = _n
 
 
+_EMBEDDINGS_AVAILABLE = (
+    settings.rag_enabled
+    and importlib.util.find_spec("faiss") is not None
+    and importlib.util.find_spec("sentence_transformers") is not None
+)
+
+
+def embeddings_enabled() -> bool:
+    """True when the embedding model is used; False means keyword fallback."""
+    return _EMBEDDINGS_AVAILABLE
+
+
+_WORD_RE = re.compile(r"[a-z0-9_]+")
+
+
+def _keywords(text: str) -> set[str]:
+    return {w for w in _WORD_RE.findall(text.lower()) if len(w) > 2}
+
+
 # ---------------------------------------------------------------------------
 # Embedding model (shared across all sessions – loaded once)
 # ---------------------------------------------------------------------------
@@ -74,6 +100,8 @@ def warmup() -> None:
     Pre-load the embedding model and run one dummy encode.
     Call this once at app startup so the first real request is fast.
     """
+    if not embeddings_enabled():
+        return
     _load_libs()
     model = _get_embed_model()
     model.encode(["warmup"], convert_to_numpy=True)
@@ -111,8 +139,13 @@ class SessionRAG:
 
     def add(self, question: str, answer: str) -> None:
         """Embed and store a completed Q&A pair. CPU-bound — use to_thread."""
-        _load_libs()
         payload = f"Q: {question}\nA: {answer}"
+        if not embeddings_enabled():
+            with self._lock:
+                self._texts.append(payload)
+            return
+
+        _load_libs()
         vec = _embed([payload])  # shape (1, dim)
 
         with self._lock:
@@ -129,6 +162,9 @@ class SessionRAG:
         Returns an empty list if the index is empty.
         CPU-bound — use to_thread when calling from async code.
         """
+        if not embeddings_enabled():
+            return self._retrieve_keywords(query, top_k)
+
         with self._lock:
             if self._index is None or self._index.ntotal == 0:
                 return []
@@ -143,6 +179,16 @@ class SessionRAG:
                 if 0 <= idx < len(self._texts):
                     results.append(self._texts[idx])
             return results
+
+    def _retrieve_keywords(self, query: str, top_k: int) -> list[str]:
+        """Rank stored turns by shared words with *query* (no model needed)."""
+        query_words = _keywords(query)
+        with self._lock:
+            texts = list(self._texts)
+        scored = [(len(query_words & _keywords(t)), i) for i, t in enumerate(texts)]
+        # Most overlap first; newer turns win ties
+        scored.sort(key=lambda pair: (pair[0], pair[1]), reverse=True)
+        return [texts[i] for score, i in scored[:top_k] if score > 0]
 
     def size(self) -> int:
         """Number of stored Q&A pairs."""

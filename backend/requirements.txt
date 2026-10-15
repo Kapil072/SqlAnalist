@@ -29,12 +29,14 @@ email-validator==2.3.0
 # ── AI, SQL safety, analysis ─────────────────────────────────
 groq==0.33.0
 sqlglot==30.18.0
-faiss-cpu==1.15.0                 # conversation memory
-sentence-transformers==6.0.1
 numpy==2.5.3
 pandas==3.0.5
 openpyxl>=3.1                     # read .xlsx uploads (pandas needs it)
 xlrd>=2.0                         # read legacy .xls uploads
+
+# Optional embedding-based chat memory (~500 MB RAM, pulls in PyTorch):
+#   pip install -r requirements-rag.txt
+# Without it the app falls back to keyword matching.
 
 # ── Cache (optional at runtime) ──────────────────────────────
 redis==8.1.0

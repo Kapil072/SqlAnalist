@@ -25,6 +25,9 @@ services:
         value: none
       - key: RATE_LIMIT_ENABLED
         value: "true"
+      # The embedding model needs ~500 MB RAM; the free plan has 512 MB
+      - key: RAG_ENABLED
+        value: "false"
       # Set these in the dashboard (sync: false = you are prompted for a value)
       - key: APP_URL            # e.g. https://sqlanalyst-api.onrender.com
         sync: false

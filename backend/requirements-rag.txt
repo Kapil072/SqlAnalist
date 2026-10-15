@@ -1,0 +1,5 @@
+# Embedding-based conversation memory (optional, ~500 MB RAM).
+# Install for local development; leave out on small hosts.
+-r requirements.txt
+faiss-cpu==1.15.0
+sentence-transformers==6.0.1

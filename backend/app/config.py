@@ -93,6 +93,10 @@ class Settings:
     llm_explanation_temperature: float = _float("LLM_EXPLANATION_TEMPERATURE", 0.3)
     llm_explanation_max_tokens: int = _int("LLM_EXPLANATION_MAX_TOKENS", 300)
 
+    # Conversation memory: embedding model (true) or keyword matching (false).
+    # The model needs ~500 MB of RAM — set false on small hosts (e.g. Render free).
+    rag_enabled: bool = os.getenv("RAG_ENABLED", "true").lower() in ("1", "true", "yes")
+
     # Security
     db_max_rows: int = _int("DB_MAX_ROWS", 10000)
     db_encryption_key: str = os.getenv("DB_ENCRYPTION_KEY", "")
