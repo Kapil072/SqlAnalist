@@ -207,6 +207,7 @@ _cors_origins = sorted({*settings.cors_origins, settings.frontend_url.rstrip("/"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
+    allow_origin_regex=settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

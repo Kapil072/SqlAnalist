@@ -48,6 +48,8 @@ class Settings:
         ).split(",")
         if o.strip()
     ]
+    # Optional regex for extra origins, e.g. Vercel's per-deployment URLs
+    cors_origin_regex: str | None = os.getenv("CORS_ORIGIN_REGEX") or None
 
     # Cookies — Secure flag defaults to on in production (requires HTTPS)
     cookie_secure: bool = os.getenv(

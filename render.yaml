@@ -35,6 +35,9 @@ services:
         sync: false
       - key: CORS_ORIGINS       # same as FRONTEND_URL
         sync: false
+      # Vercel gives every deployment its own URL (sqlanalyst-<id>-kapil072s-projects.vercel.app)
+      - key: CORS_ORIGIN_REGEX
+        value: ^https://sqlanalyst-[a-z0-9-]+-kapil072s-projects\.vercel\.app$
       - key: DB_ENCRYPTION_KEY  # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
         sync: false
       - key: GROQ_API_KEY
