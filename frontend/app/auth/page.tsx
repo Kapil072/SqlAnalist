@@ -241,14 +241,17 @@ export default function AuthPage() {
       if (error.status === 403) {
         setOtpEmail(String(fd.get('email') || ''));
         try {
-          const r = await apiPost<{ dev_otp?: string }>('/auth/send-otp', {
-            email: fd.get('email'),
-          });
+          const r = await apiPost<{ dev_otp?: string; email_sent?: boolean; detail?: string }>(
+            '/auth/send-otp',
+            { email: fd.get('email') },
+          );
           switchTab('otp');
           if (r.dev_otp) {
             showAlert(`Your OTP: ${r.dev_otp}`, 'success');
             prefillOTP(r.dev_otp);
-          } else showAlert('Verification code sent to your email.', 'success');
+          } else if (r.email_sent === false)
+            showAlert(r.detail || 'Could not send the code. Try again later.', 'error');
+          else showAlert('Verification code sent to your email.', 'success');
         } catch {
           switchTab('otp');
         }
