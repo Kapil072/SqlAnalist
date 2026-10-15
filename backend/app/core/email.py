@@ -1,5 +1,6 @@
 """
-Email sender utility using smtplib.
+Email sender utility using smtplib, or the Brevo HTTP API when BREVO_API_KEY
+is set (for hosts that block SMTP ports, e.g. Render free).
 In development (SMTP not configured), tokens are logged to the console so you
 can still test without a real mail server.
 """
@@ -9,6 +10,8 @@ import socket
 import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+
+import httpx
 
 from app.config import settings
 from app.utils.logger import logger
@@ -23,12 +26,35 @@ def _password() -> str:
     return settings.smtp_password.replace(" ", "").strip()
 
 
+BREVO_URL = "https://api.brevo.com/v3/smtp/email"
+
+
+def _send_brevo(to_email: str, subject: str, html: str) -> None:
+    """Send an HTML email through Brevo's HTTPS API. Raises on error."""
+    response = httpx.post(
+        BREVO_URL,
+        headers={"api-key": settings.brevo_api_key, "accept": "application/json"},
+        json={
+            "sender": {"name": "SQLAnalyst", "email": settings.smtp_from or settings.smtp_user},
+            "to": [{"email": to_email}],
+            "subject": subject,
+            "htmlContent": html,
+        },
+        timeout=settings.smtp_timeout,
+    )
+    response.raise_for_status()
+
+
 def _send(to_email: str, subject: str, html: str) -> None:
-    """Send an HTML email via SMTP. Raises on error (caller handles).
+    """Send an HTML email via Brevo (if configured) or SMTP. Raises on error (caller handles).
 
     Port 465 uses SSL from the start; any other port (587, 25, 2525) uses
     STARTTLS. Both work with Gmail.
     """
+    if settings.brevo_api_key:
+        _send_brevo(to_email, subject, html)
+        return
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = settings.smtp_from or settings.smtp_user
@@ -55,6 +81,14 @@ def _send(to_email: str, subject: str, html: str) -> None:
 def explain_smtp_error(exc: Exception) -> str:
     """Turn a low-level SMTP/socket error into a fix the admin can act on."""
     host = settings.smtp_host
+    if isinstance(exc, httpx.HTTPStatusError):
+        hint = (
+            f"Brevo rejected the email (HTTP {exc.response.status_code}): {exc.response.text}."
+            " Check BREVO_API_KEY and that SMTP_FROM is a verified sender in Brevo."
+        )
+        return hint
+    if isinstance(exc, httpx.HTTPError):
+        return f"could not reach the Brevo API. [{type(exc).__name__}: {exc}]"
     if isinstance(exc, smtplib.SMTPAuthenticationError):
         hint = (
             "the mail server rejected SMTP_USER / SMTP_PASSWORD."

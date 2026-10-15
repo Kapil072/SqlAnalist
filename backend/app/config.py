@@ -112,8 +112,15 @@ class Settings:
     # Print every SQL statement the app runs (very noisy — hides real errors)
     sql_echo: bool = os.getenv("SQL_ECHO", "false").lower() in ("1", "true", "yes")
 
+    # Brevo HTTP email API. Used instead of SMTP when set — needed on hosts that
+    # block outbound SMTP ports (e.g. Render free). Sender = SMTP_FROM, which
+    # must be a verified sender in Brevo.
+    brevo_api_key: str = os.getenv("BREVO_API_KEY", "")
+
     @property
     def smtp_configured(self) -> bool:
+        if self.brevo_api_key:
+            return bool(self.smtp_from or self.smtp_user)
         return bool(self.smtp_host and self.smtp_user and self.smtp_password)
 
     # Default admin seed credentials
