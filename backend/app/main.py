@@ -130,6 +130,10 @@ async def lifespan(app: FastAPI):
     # Initialize query cache
     await query_cache.initialize()
 
+    from app.core.email import describe_transport
+
+    logger.info(f"[EMAIL] Sending via {describe_transport()}")
+
     # Introspect the target DB and rebuild schema_cache.json.
     # Runs in a thread because SQLAlchemy's inspect() is synchronous.
     from app.db.schema_registry import refresh_schema

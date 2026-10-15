@@ -104,11 +104,11 @@ class Settings:
     db_encryption_key: str = os.getenv("DB_ENCRYPTION_KEY", "")
 
     # SMTP (for email verification & password reset)
-    smtp_host: str = os.getenv("SMTP_HOST", "")
+    smtp_host: str = os.getenv("SMTP_HOST", "").strip()
     smtp_port: int = _int("SMTP_PORT", 465)
-    smtp_user: str = os.getenv("SMTP_USER", "")
+    smtp_user: str = os.getenv("SMTP_USER", "").strip()
     smtp_password: str = os.getenv("SMTP_PASSWORD", "")
-    smtp_from: str = os.getenv("SMTP_FROM", "noreply@sqlanalyst.local")
+    smtp_from: str = os.getenv("SMTP_FROM", "noreply@sqlanalyst.local").strip()
     smtp_timeout: int = _int("SMTP_TIMEOUT", 15)  # seconds before giving up on the mail server
 
     # Print every SQL statement the app runs (very noisy — hides real errors)

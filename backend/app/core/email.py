@@ -113,8 +113,9 @@ def explain_smtp_error(exc: Exception) -> str:
         hint = f"cannot find mail server '{host}' — check SMTP_HOST and your internet connection."
     elif isinstance(exc, (TimeoutError, socket.timeout, ConnectionRefusedError, OSError)):
         hint = (
-            f"could not reach {host}:{settings.smtp_port} — a firewall, antivirus or network"
-            " is blocking it. Try SMTP_PORT=587 (or 465 if you were on 587)."
+            f"could not reach {host}:{settings.smtp_port}. Many hosts (including Render's"
+            " free plan) block outgoing SMTP — set BREVO_API_KEY (an xkeysib- key) to send"
+            " over HTTPS instead. On your own computer, a firewall or antivirus may be the cause."
         )
     else:
         hint = "unexpected mail error."
@@ -133,6 +134,18 @@ def _btn(url: str, label: str) -> str:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def describe_transport() -> str:
+    """One line saying how email will be sent — logged at startup (no secrets)."""
+    if settings.brevo_api_key:
+        return f"Brevo API (HTTPS), from {settings.smtp_from or settings.smtp_user}"
+    if settings.smtp_configured:
+        return (
+            f"SMTP {settings.smtp_host}:{settings.smtp_port} as {settings.smtp_user},"
+            f" from {settings.smtp_from}"
+        )
+    return "not configured — OTP codes are only written to the log"
 
 
 def send_password_reset_email(to_email: str, name: str, token: str) -> bool:
