@@ -78,6 +78,14 @@ async def _issue_otp(db: AsyncSession, email: str) -> str:
     return code
 
 
+EMAIL_OFF = "Email is turned off on this server, so codes and reset links can't be sent."
+
+
+def _require_email() -> None:
+    if not settings.email_enabled:
+        raise HTTPException(status_code=400, detail=EMAIL_OFF)
+
+
 def _dev_only(response: dict, **dev_fields) -> dict:
     """
     Attach debugging fields (OTP codes, reset links) to a response ONLY in
@@ -91,7 +99,17 @@ def _dev_only(response: dict, **dev_fields) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Register  — creates account, then sends an OTP (or, with EMAIL_VERIFICATION
+# Config  — public settings the sign-in page needs (no secrets)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/config")
+async def auth_config():
+    return {"email_enabled": settings.email_enabled}
+
+
+# ---------------------------------------------------------------------------
+# Register  — creates account, then sends an OTP (or, with EMAIL_ENABLED
 #             off, logs the new user straight in)
 # ---------------------------------------------------------------------------
 
@@ -120,7 +138,7 @@ async def register(
     await db.commit()
     await db.refresh(user)
 
-    if not settings.email_verification:
+    if not settings.email_enabled:
         access_token = issue_token_pair(user, response)
         return TokenResponse(
             access_token=access_token,
@@ -159,6 +177,7 @@ async def send_otp(
     body: SendOTPRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    _require_email()
     email = body.email.lower()
     result = await db.execute(select(User).where(func.lower(User.email) == email))
     user = result.scalar_one_or_none()
@@ -270,7 +289,7 @@ async def login(
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is deactivated")
-    if settings.email_verification and not user.email_verified:
+    if settings.email_enabled and not user.email_verified:
         raise HTTPException(
             status_code=403,
             detail="Email not verified. Please enter the OTP sent to your email.",
@@ -368,6 +387,7 @@ async def forgot_password(
     body: ForgotPasswordRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    _require_email()
     generic = {
         "detail": "If that email is registered, a reset link has been sent.",
         "email_sent": False,

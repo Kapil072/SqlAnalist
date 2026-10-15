@@ -164,6 +164,18 @@ export async function fetchHealth(): Promise<HealthData> {
   return res.json();
 }
 
+// ─── Server auth settings ────────────────────────────────────
+// email_enabled = false: the server sends no email (no sign-up codes,
+// no password-reset links), so the UI hides those features.
+export interface AuthConfig {
+  email_enabled: boolean;
+}
+export async function fetchAuthConfig(): Promise<AuthConfig> {
+  const res = await fetch(`${API}/auth/config`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 // ─── Schema ──────────────────────────────────────────────────
 export interface Column {
   name: string;

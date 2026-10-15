@@ -10,6 +10,7 @@ import {
   updateDataSource,
   testDataSourceConnection,
   deleteDataSource,
+  fetchAuthConfig,
   AdminStats,
   AdminUser,
   AuditLog,
@@ -628,6 +629,14 @@ export default function AdminPage() {
   const [toast, setToast] = useState('');
   const [showAddDS, setShowAddDS] = useState(false);
   const [editDS, setEditDS] = useState<DataSource | null>(null);
+  // "Verified" only means something when the server sends sign-up codes
+  const [emailEnabled, setEmailEnabled] = useState(false);
+
+  useEffect(() => {
+    fetchAuthConfig()
+      .then(cfg => setEmailEnabled(cfg.email_enabled))
+      .catch(() => setEmailEnabled(false));
+  }, []);
 
   function showToast(msg: string) {
     setToast(msg);
@@ -979,16 +988,18 @@ export default function AdminPage() {
               <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr className="bg-teal-50/60">
-                    {['Name', 'Email', 'Role', 'Status', 'Verified', 'Joined', 'Actions'].map(h => (
-                      <th
-                        key={h}
-                        className="px-4 py-3 text-left text-[11px] font-bold uppercase
+                    {['Name', 'Email', 'Role', 'Status', 'Verified', 'Joined', 'Actions']
+                      .filter(h => emailEnabled || h !== 'Verified')
+                      .map(h => (
+                        <th
+                          key={h}
+                          className="px-4 py-3 text-left text-[11px] font-bold uppercase
                                            tracking-wider text-slate-500 border-b border-slate-200
                                            whitespace-nowrap"
-                      >
-                        {h}
-                      </th>
-                    ))}
+                        >
+                          {h}
+                        </th>
+                      ))}
                   </tr>
                 </thead>
                 <tbody>
@@ -1019,12 +1030,14 @@ export default function AdminPage() {
                           variant={u.is_active ? 'green' : 'red'}
                         />
                       </td>
-                      <td className="px-4 py-3">
-                        <Badge
-                          label={u.email_verified ? 'Verified' : 'Pending'}
-                          variant={u.email_verified ? 'green' : 'amber'}
-                        />
-                      </td>
+                      {emailEnabled && (
+                        <td className="px-4 py-3">
+                          <Badge
+                            label={u.email_verified ? 'Verified' : 'Pending'}
+                            variant={u.email_verified ? 'green' : 'amber'}
+                          />
+                        </td>
+                      )}
                       <td className="px-4 py-3 text-slate-400 text-xs whitespace-nowrap">
                         {timeAgo(u.created_at)}
                       </td>

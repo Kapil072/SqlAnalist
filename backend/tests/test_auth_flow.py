@@ -15,8 +15,8 @@ from app.core.rate_limit import limiter
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
     # Never send real email from tests; reset rate-limit counters per test.
-    # These tests cover the OTP flow, so verification is on unless a test says otherwise.
-    monkeypatch.setattr(settings, "email_verification", True)
+    # These tests cover the email flows, so email is on unless a test says otherwise.
+    monkeypatch.setattr(settings, "email_enabled", True)
     monkeypatch.setattr(auth_routes, "send_otp_email", lambda *a, **k: False)
     monkeypatch.setattr(auth_routes, "send_password_reset_email", lambda *a, **k: False)
     if hasattr(limiter, "reset"):
@@ -50,8 +50,8 @@ async def test_dev_otp_only_in_development(client: AsyncClient, monkeypatch):
     assert len(r.json()["dev_otp"]) == 6
 
 
-async def test_register_logs_in_directly_without_verification(client: AsyncClient, monkeypatch):
-    monkeypatch.setattr(settings, "email_verification", False)
+async def test_register_logs_in_directly_when_email_off(client: AsyncClient, monkeypatch):
+    monkeypatch.setattr(settings, "email_enabled", False)
     r = await _register(client, "noverify@test.com")
     assert r.status_code == 201
     assert r.json()["access_token"]
@@ -66,7 +66,17 @@ async def test_register_logs_in_directly_without_verification(client: AsyncClien
     assert r.json()["user"]["email_verified"] is False
 
 
-async def test_unverified_login_blocked_when_verification_on(client: AsyncClient):
+async def test_email_off_disables_codes_and_reset_links(client: AsyncClient, monkeypatch):
+    monkeypatch.setattr(settings, "email_enabled", False)
+    r = await client.get("/auth/config")
+    assert r.json() == {"email_enabled": False}
+    r = await client.post("/auth/forgot-password", json={"email": "someone@test.com"})
+    assert r.status_code == 400
+    r = await client.post("/auth/send-otp", json={"email": "someone@test.com"})
+    assert r.status_code == 400
+
+
+async def test_unverified_login_blocked_when_email_on(client: AsyncClient):
     await _register(client, "blocked@test.com")
     r = await client.post(
         "/auth/login", json={"email": "blocked@test.com", "password": "Password1"}

@@ -103,9 +103,10 @@ class Settings:
     db_max_rows: int = _int("DB_MAX_ROWS", 10000)
     db_encryption_key: str = os.getenv("DB_ENCRYPTION_KEY", "")
 
-    # Require new accounts to confirm their email with a 6-digit code before
-    # they can log in. Off by default; turn it on once sending email works.
-    email_verification: bool = os.getenv("EMAIL_VERIFICATION", "false").lower() in (
+    # Email features: a 6-digit code to verify new accounts before they can log
+    # in, and password-reset links. Off by default (the app then sends no email);
+    # turn on once sending email works.
+    email_enabled: bool = os.getenv("EMAIL_ENABLED", "false").lower() in (
         "1",
         "true",
         "yes",

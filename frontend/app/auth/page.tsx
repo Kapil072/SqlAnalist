@@ -2,7 +2,7 @@
 import { useState, useRef, useEffect, KeyboardEvent, ClipboardEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
-import { apiPost, saveSession, getToken } from '@/lib/api';
+import { apiPost, saveSession, getToken, fetchAuthConfig } from '@/lib/api';
 import { AnimatePresence, motion, spring, ease } from '@/components/motion';
 
 type Tab = 'login' | 'register' | 'otp' | 'forgot' | 'reset';
@@ -47,6 +47,8 @@ export default function AuthPage() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showResetPw, setShowResetPw] = useState(false);
   const [devResetUrl, setDevResetUrl] = useState('');
+  // Hidden until the server confirms it can send email
+  const [emailEnabled, setEmailEnabled] = useState(false);
 
   const otpRefs = useRef<Array<HTMLInputElement | null>>([]);
   const googleBtnRef = useRef<HTMLDivElement>(null);
@@ -93,6 +95,13 @@ export default function AuthPage() {
       }
     }
   }, [router]);
+
+  // ── Ask the server whether email features are on ───────────
+  useEffect(() => {
+    fetchAuthConfig()
+      .then(cfg => setEmailEnabled(cfg.email_enabled))
+      .catch(() => setEmailEnabled(false));
+  }, []);
 
   // ── Load Google Identity Services script ───────────────────
   useEffect(() => {
@@ -590,16 +599,18 @@ export default function AuthPage() {
                     </div>
                   </Field>
 
-                  <div className="flex justify-end">
-                    <button
-                      type="button"
-                      onClick={() => switchTab('forgot')}
-                      className="text-xs text-slate-500 hover:text-teal-700
-                               hover:underline transition-colors"
-                    >
-                      Forgot password?
-                    </button>
-                  </div>
+                  {emailEnabled && (
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => switchTab('forgot')}
+                        className="text-xs text-slate-500 hover:text-teal-700
+                                 hover:underline transition-colors"
+                      >
+                        Forgot password?
+                      </button>
+                    </div>
+                  )}
 
                   <button type="submit" disabled={loading} className={btnCls}>
                     {loading ? <Spinner /> : 'Sign In'}
