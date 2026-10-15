@@ -117,7 +117,7 @@ class Settings:
     # Brevo HTTP email API. Used instead of SMTP when set — needed on hosts that
     # block outbound SMTP ports (e.g. Render free). Sender = SMTP_FROM, which
     # must be a verified sender in Brevo.
-    brevo_api_key: str = os.getenv("BREVO_API_KEY", "")
+    brevo_api_key: str = os.getenv("BREVO_API_KEY", "").strip()
 
     @property
     def smtp_configured(self) -> bool:

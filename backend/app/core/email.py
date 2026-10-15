@@ -82,6 +82,11 @@ def explain_smtp_error(exc: Exception) -> str:
     """Turn a low-level SMTP/socket error into a fix the admin can act on."""
     host = settings.smtp_host
     if isinstance(exc, httpx.HTTPStatusError):
+        if settings.brevo_api_key.startswith("xsmtpsib-"):
+            return (
+                "BREVO_API_KEY is a Brevo SMTP key (xsmtpsib-...). The API needs an API key"
+                " (xkeysib-...) from app.brevo.com/settings/keys/api."
+            )
         hint = (
             f"Brevo rejected the email (HTTP {exc.response.status_code}): {exc.response.text}."
             " Check BREVO_API_KEY and that SMTP_FROM is a verified sender in Brevo."
