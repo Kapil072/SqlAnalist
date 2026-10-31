@@ -17,7 +17,7 @@ flowchart LR
 | App database | SQLite (dev) or PostgreSQL | Users, OTP codes, chat history, audit log, saved data sources |
 | Default database | Any SQLAlchemy URL | The database questions go to unless the user picks another |
 | Data sources | PostgreSQL, MySQL, SQLite, SQL Server, Oracle | Extra databases added by an admin; users choose one in the top-bar switcher |
-| LLM | Groq (`llama-3.3-70b-versatile` by default) | Writes SQL, explains results |
+| LLM | Groq (`qwen/qwen3.8-27b` by default) | Writes SQL, explains results |
 | Chat memory | `sentence-transformers` + FAISS, in memory | Recalls relevant earlier answers in the same conversation |
 | SQL safety | `sqlglot` | 11-check validator — see [Security](security.md) |
 | Cache | Redis (optional) | Caches admin data-source query results for 5 minutes |

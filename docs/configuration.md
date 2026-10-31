@@ -43,7 +43,7 @@ win over `.env`. The code lives in `backend/app/config.py`;
 | Variable | Default | Description |
 |---|---|---|
 | `GROQ_API_KEY` | *(empty)* | Key from console.groq.com (starts with `gsk_`). Without it, questions must be typed as SQL (`SELECT …` / `WITH …`) and explanations use a simple built-in summary |
-| `LLM_MODEL` | `llama-3.3-70b-versatile` | Model used for SQL generation and explanations |
+| `LLM_MODEL` | `qwen/qwen3.8-27b` | Model used for SQL generation and explanations |
 | `LLM_BASE_URL` | `https://api.groq.com` | API base URL |
 | `LLM_TEMPERATURE` | `0.0` | Temperature for SQL generation (keep at 0) |
 | `LLM_MAX_TOKENS` | `500` | Max tokens for generated SQL |

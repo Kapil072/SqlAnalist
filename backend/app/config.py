@@ -88,7 +88,7 @@ class Settings:
 
     # AI / LLM
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
-    llm_model: str = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+    llm_model: str = os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")
     llm_base_url: str = os.getenv("LLM_BASE_URL", "https://api.groq.com")
     llm_temperature: float = _float("LLM_TEMPERATURE", 0.0)
     llm_max_tokens: int = _int("LLM_MAX_TOKENS", 500)

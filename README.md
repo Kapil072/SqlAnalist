@@ -17,7 +17,7 @@ short explanation streamed in real time.
 
 ## 🌟 Features
 
-- **Chat with your data** — questions become SQL via Groq (`llama-3.3-70b-versatile`),
+- **Chat with your data** — questions become SQL via Groq (`qwen/qwen3.8-27b`),
   results stream back over Server-Sent Events with an automatic chart
   (line for dates, pie for a few categories, bar otherwise).
 - **Several databases, one picker** — the default database (`TARGET_DB_URL`)
